@@ -8,6 +8,11 @@ from typing import Any, Iterable, Mapping
 from .comfy_workflow import as_str, extract_prompt_and_extra, get_node_title, parse_node_input_ref, read_json
 
 
+# OpenAI /v1/audio/speech passthrough params; sidecars can bind them to
+# TTS node inputs like any other standard parameter. Kept as one named
+# tuple so the endpoint and STANDARD_PARAMETER_ORDER cannot drift apart.
+AUDIO_PARAMETER_ORDER = ("voice", "speed", "instructions")
+
 STANDARD_PARAMETER_ORDER = (
     "size",
     "width",
@@ -19,6 +24,7 @@ STANDARD_PARAMETER_ORDER = (
     "fps",
     "duration",
     "frames",
+    *AUDIO_PARAMETER_ORDER,
 )
 
 

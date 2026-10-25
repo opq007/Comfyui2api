@@ -512,12 +512,14 @@ class WorkflowCapabilities:
     has_load_image: bool
     has_save_image: bool
     has_save_video: bool
+    has_save_audio: bool
 
 
 def detect_capabilities(prompt: Dict[str, Any]) -> WorkflowCapabilities:
     has_load_image = False
     has_save_image = False
     has_save_video = False
+    has_save_audio = False
     for node in prompt.values():
         if not isinstance(node, dict):
             continue
@@ -528,12 +530,18 @@ def detect_capabilities(prompt: Dict[str, Any]) -> WorkflowCapabilities:
             has_save_image = True
         if "savevideo" in cls or "createvideo" in cls or "videocombine" in cls:
             has_save_video = True
+        if "saveaudio" in cls:
+            has_save_audio = True
 
     kind = "unknown"
     if has_save_video and has_load_image:
         kind = "img2video"
     elif has_save_video and not has_load_image:
         kind = "txt2video"
+    elif has_save_audio:
+        # TTS workflows (edge-tts / CosyVoice / GPT-SoVITS / IndexTTS ...)
+        # terminate in a SaveAudio-style node and take text, not images.
+        kind = "txt2audio"
     elif has_save_image and has_load_image:
         kind = "img2img"
     elif has_save_image and not has_load_image:
@@ -544,4 +552,5 @@ def detect_capabilities(prompt: Dict[str, Any]) -> WorkflowCapabilities:
         has_load_image=has_load_image,
         has_save_image=has_save_image,
         has_save_video=has_save_video,
+        has_save_audio=has_save_audio,
     )

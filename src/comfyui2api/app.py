@@ -51,7 +51,7 @@ from .util import (
     guess_media_type,
     utc_now_unix,
 )
-from .workflow_params import STANDARD_PARAMETER_ORDER
+from .workflow_params import AUDIO_PARAMETER_ORDER, STANDARD_PARAMETER_ORDER
 from .workflow_registry import WorkflowRegistry
 
 
@@ -776,6 +776,23 @@ def create_app() -> FastAPI:
             return filename
         raw_url = str(item.get("url") or "").strip()
         return Path(raw_url).name if raw_url else ""
+
+    def _pick_audio_output(outputs: list[dict[str, Any]]) -> Mapping[str, Any] | None:
+        # Prefer an actual audio output (MIME or extension) over "whatever
+        # came first": a TTS workflow may also emit ancillary files (e.g. a
+        # preview image), and blind outputs[0] could return those instead.
+        def _is_audio(item: Mapping[str, Any]) -> bool:
+            media = str(item.get("media_type") or "").lower()
+            if media.startswith("audio/"):
+                return True
+            return _output_filename(item).lower().endswith(
+                (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus")
+            )
+
+        for item in outputs:
+            if _is_audio(item):
+                return item
+        return outputs[0] if outputs else None
 
     def _b64_json_data(job_id: str, outputs: list[dict[str, Any]]) -> list[dict[str, str]]:
         encoded: list[dict[str, str]] = []
@@ -1924,6 +1941,57 @@ def create_app() -> FastAPI:
             "metadata": meta_out,
             "error": err,
         }
+
+    @app.post("/v1/audio/speech")
+    async def openai_audio_speech(
+        request: Request,
+        body: Dict[str, Any],
+        authorization: Optional[str] = Header(default=None),
+        x_comfyui_async: Optional[str] = Header(default=None),
+    ) -> Any:
+        # OpenAI TTS contract: POST {model, input, voice, response_format,
+        # speed, instructions} -> audio bytes in the response body. The actual
+        # audio container is decided by the workflow's SaveAudio node, so the
+        # file's real MIME type is returned and `response_format` is accepted
+        # but not enforced (no transcoding dependency).
+        _require_auth(cfg, authorization)
+        input_text = str(body.get("input") or "").strip()
+        if not input_text:
+            raise _openai_error("Missing 'input'", http_status=400)
+        resolved = await _resolve_public_model(
+            model=str(body.get("model") or "").strip(),
+            kind="txt2audio",
+            has_image=False,
+        )
+        wf = resolved.workflow
+        standard_params = _collect_standard_params(
+            {key: body.get(key) for key in AUDIO_PARAMETER_ORDER if key in body}
+        )
+        job = await jobs.create_job(
+            kind="txt2audio",
+            workflow=wf.name,
+            platform="OpenAI",
+            requested_model=resolved.record.slug,
+            prompt=input_text,
+            standard_params=standard_params,
+        )
+        if x_comfyui_async and str(x_comfyui_async).strip() not in {"0", "false", "False"}:
+            return {"job_id": job.job_id, "status": "pending"}
+
+        done = await _openai_wait(job.job_id)
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        pick = _pick_audio_output(outputs)
+        filename = _output_filename(pick) if pick is not None else ""
+        if not filename:
+            raise _openai_error("Speech generation produced no audio output", http_status=500)
+        path = Path(cfg.runs_dir) / str(done.get("job_id") or job.job_id) / filename
+        if not path.is_file():
+            raise _openai_error("Audio output file missing", http_status=500)
+        return FileResponse(
+            path=str(path),
+            media_type=guess_media_type(filename),
+            filename=filename,
+        )
 
     if cfg.ui_enabled:
         from .webui import mount_webui

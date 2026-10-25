@@ -23,7 +23,8 @@ const modes: Array<{ kind: PlaygroundKind; label: string }> = [
   { kind: "txt2img", label: "文生图" },
   { kind: "img2img", label: "图生图" },
   { kind: "txt2video", label: "文生视频" },
-  { kind: "img2video", label: "图生视频" }
+  { kind: "img2video", label: "图生视频" },
+  { kind: "txt2audio", label: "文生语音" }
 ];
 
 const emptyFields = {
@@ -44,6 +45,8 @@ const emptyFields = {
   frames: "",
   quality: "",
   metadata: "",
+  voice: "",
+  speed: "",
   imageUrl: ""
 };
 
@@ -67,6 +70,7 @@ export function PlaygroundPanel(): React.ReactElement {
 
   const needsImage = kind === "img2img" || kind === "img2video";
   const isVideo = kind === "txt2video" || kind === "img2video";
+  const isAudio = kind === "txt2audio";
 
   const filteredModels = useMemo(
     () => models.filter((item) => (item.kind || []).includes(kind)),
@@ -410,6 +414,18 @@ export function PlaygroundPanel(): React.ReactElement {
               placeholder="可选"
             />
           </label>
+          {isAudio ? (
+            <>
+              <label className="playground-field">
+                <span>voice</span>
+                <input value={fields.voice} onChange={(event) => setField("voice", event.target.value)} placeholder="可选，如 alloy" />
+              </label>
+              <label className="playground-field">
+                <span>speed</span>
+                <input value={fields.speed} onChange={(event) => setField("speed", event.target.value)} placeholder="可选，如 1.0" />
+              </label>
+            </>
+          ) : null}
           {needsImage ? (
             <div className="playground-field span-all">
               <span>参考图（文件优先，否则 URL）</span>
@@ -431,19 +447,23 @@ export function PlaygroundPanel(): React.ReactElement {
               </div>
             </div>
           ) : null}
-          <label className="playground-field">
-            <span>size</span>
-            <input value={fields.size} onChange={(event) => setField("size", event.target.value)} placeholder="1024x1024" />
-          </label>
-          <label className="playground-field">
-            <span>width</span>
-            <input value={fields.width} onChange={(event) => setField("width", event.target.value)} placeholder="可选" />
-          </label>
-          <label className="playground-field">
-            <span>height</span>
-            <input value={fields.height} onChange={(event) => setField("height", event.target.value)} placeholder="可选" />
-          </label>
-          {!isVideo ? (
+          {!isAudio ? (
+            <>
+              <label className="playground-field">
+                <span>size</span>
+                <input value={fields.size} onChange={(event) => setField("size", event.target.value)} placeholder="1024x1024" />
+              </label>
+              <label className="playground-field">
+                <span>width</span>
+                <input value={fields.width} onChange={(event) => setField("width", event.target.value)} placeholder="可选" />
+              </label>
+              <label className="playground-field">
+                <span>height</span>
+                <input value={fields.height} onChange={(event) => setField("height", event.target.value)} placeholder="可选" />
+              </label>
+            </>
+          ) : null}
+          {!isVideo && !isAudio ? (
             <label className="playground-field">
               <span>n</span>
               <input value={fields.n} onChange={(event) => setField("n", event.target.value)} placeholder="1" />
@@ -502,12 +522,14 @@ export function PlaygroundPanel(): React.ReactElement {
               {submitting ? <LoaderCircle size={16} /> : <Play size={16} />}
               {submitting ? "提交中" : "生成"}
             </button>
-            <small>{isVideo ? "POST /v1/videos" : kind === "img2img" ? "POST /v1/images/edits · async" : "POST /v1/images/generations · async"}</small>
+            <small>{isAudio ? "POST /v1/audio/speech · async" : isVideo ? "POST /v1/videos" : kind === "img2img" ? "POST /v1/images/edits · async" : "POST /v1/images/generations · async"}</small>
           </div>
         </form>
         <div className="playground-result">
           <div className="preview-stage playground-preview">
-            {previewUrl && (isVideo || looksVideo(previewUrl)) ? (
+            {previewUrl && (isAudio || looksAudio(previewUrl)) ? (
+              <audio src={previewUrl} controls />
+            ) : previewUrl && (isVideo || looksVideo(previewUrl)) ? (
               <video src={previewUrl} controls />
             ) : previewUrl ? (
               <img src={previewUrl} alt="生成结果" />
@@ -548,4 +570,8 @@ export function PlaygroundPanel(): React.ReactElement {
 
 function looksVideo(url: string): boolean {
   return /\.(mp4|webm|mov|gif)(\?|$)/i.test(url);
+}
+
+function looksAudio(url: string): boolean {
+  return /\.(wav|mp3|flac|ogg|m4a|aac|opus)(\?|$)/i.test(url);
 }

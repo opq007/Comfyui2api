@@ -164,6 +164,8 @@ def capability_kinds(caps: Any) -> tuple[str, ...]:
         kinds.append("txt2video")
         if has_load:
             kinds.append("img2video")
+    if bool(getattr(caps, "has_save_audio", False)):
+        kinds.append("txt2audio")
     return tuple(kinds)
 
 
@@ -194,6 +196,8 @@ def _kind_error(workflow: WorkflowDefinition, kind: str) -> str:
         missing.append("missing SaveImage")
     if kind in {"txt2video", "img2video"} and not getattr(caps, "has_save_video", False):
         missing.append("missing SaveVideo")
+    if kind == "txt2audio" and not getattr(caps, "has_save_audio", False):
+        missing.append("missing SaveAudio")
     detail = f"detected kind={getattr(caps, 'kind', 'unknown')}"
     if missing:
         detail += f"; {', '.join(missing)}"

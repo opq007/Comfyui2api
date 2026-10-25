@@ -24,5 +24,6 @@ export const kindLabels: Record<string, string> = {
   txt2img: "文生图",
   img2img: "图生图",
   txt2video: "文生视频",
-  img2video: "图生视频"
+  img2video: "图生视频",
+  txt2audio: "文生语音"
 };

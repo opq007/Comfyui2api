@@ -133,7 +133,10 @@ def pick_primary_url(outputs: list[dict[str, Any]]) -> Optional[str]:
     if not outputs:
         return None
 
-    preferred_exts = (".mp4", ".webm", ".gif", ".mov")
+    # Video extensions stay ahead of audio so mixed outputs keep a playable
+    # poster/preview as primary; audio extensions ensure pure-TTS jobs pick
+    # an audio file deterministically instead of relying on ordering.
+    preferred_exts = (".mp4", ".webm", ".gif", ".mov", ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus")
     for ext in preferred_exts:
         for item in outputs:
             fn = item.get("filename")

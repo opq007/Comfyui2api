@@ -143,7 +143,7 @@ export class PublicAuthError extends Error {
   }
 }
 
-export type PlaygroundKind = "txt2img" | "img2img" | "txt2video" | "img2video";
+export type PlaygroundKind = "txt2img" | "img2img" | "txt2video" | "img2video" | "txt2audio";
 
 export interface PublicModel {
   id: string;
@@ -410,6 +410,8 @@ export interface PlaygroundFields {
   frames?: string;
   quality?: string;
   metadata?: string;
+  voice?: string;
+  speed?: string;
   imageFile?: File | null;
   imageUrl?: string;
 }
@@ -502,6 +504,27 @@ export async function submitPlayground(kind: PlaygroundKind, fields: PlaygroundF
       body
     };
     const response = await requestPublicJson<{ job_id?: string }>("/v1/images/edits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body: JSON.stringify(body)
+    });
+    return { jobId: response.job_id, response, request };
+  }
+
+  if (kind === "txt2audio") {
+    const body = omitEmpty({
+      model: fields.model,
+      input: fields.prompt,
+      voice: fields.voice,
+      speed: fields.speed
+    });
+    const request: PlaygroundRequestTrace = {
+      method: "POST",
+      path: "/v1/audio/speech",
+      headers: { Authorization: "Bearer ***", "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body
+    };
+    const response = await requestPublicJson<{ job_id?: string }>("/v1/audio/speech", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-comfyui-async": "1" },
       body: JSON.stringify(body)
