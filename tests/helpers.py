@@ -91,5 +91,8 @@ def fake_job_deps(*, client: Any | None = None, timeout_s: int = 30, poll_interv
         poll_interval_s=poll_interval_s,
         runs_dir=runs_dir,
         input_subdir="comfyui2api",
+        api_token="test-api-token",
+        signed_url_secret="",
+        signed_url_ttl_seconds=3600,
     )
     return SimpleNamespace(cfg=cfg, pool=pool, backend=backend, client=job_client)

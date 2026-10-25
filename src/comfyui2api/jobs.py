@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 from .backend_store import BackendStore
 from .comfy_client import ComfyApiError, ComfyUIClient, history_entry_error, history_entry_is_complete
@@ -21,12 +22,35 @@ from .comfy_workflow import (
 from .config import Config
 from .instance_pool import InstancePool
 from .job_scheduler import JobScheduler
+from .signed_urls import create_signed_query, signing_secret
 from .util import guess_media_type, json_dumps, pick_primary_url, sanitize_filename_part, utc_now_iso, utc_now_unix
 from .workflow_params import apply_img2img_resize_params, resolve_standard_overrides
 from .workflow_registry import WorkflowDefinition, WorkflowRegistry
 
 
 logger = logging.getLogger(__name__)
+
+
+def _signed_media_url(cfg: Config, url: str) -> str:
+    """Sign a relative /runs/... URL so <img>/<video> tags can load it
+    without an Authorization header.
+
+    WS-pushed events (job_snapshot / job_completed) used to carry bare
+    /runs/ paths, which the download endpoint rejects for browsers (they
+    cannot set headers), so playground results showed as broken images.
+    The signature covers path+expiry only, so it needs no request context,
+    and consumers that re-sign (REST rewriters) strip sig/exp first —
+    signing here is idempotent for them.
+    """
+    raw = str(url or "")
+    if not raw.startswith("/runs/"):
+        return raw
+    secret = signing_secret(configured_secret=cfg.signed_url_secret, api_token=cfg.api_token)
+    if not secret:
+        return raw
+    path = raw.split("?", 1)[0]
+    signed = create_signed_query(path=path, ttl_seconds=cfg.signed_url_ttl_seconds, secret=secret)
+    return f"{path}?{urlencode(signed)}"
 
 
 @dataclass
@@ -240,10 +264,15 @@ class JobManager:
             "progress_percent": job.progress_percent,
             "error": job.error or None,
             "request_json": job.request_json or {},
-            "url": job.url or None,
+            "url": _signed_media_url(self.cfg, job.url or "") or None,
             "output_count": len(job.outputs or []),
-            "outputs": [o.__dict__ for o in (job.outputs or [])],
+            "outputs": [self._public_output(o) for o in (job.outputs or [])],
         }
+
+    def _public_output(self, output: JobOutput) -> Dict[str, Any]:
+        payload = dict(output.__dict__)
+        payload["url"] = _signed_media_url(self.cfg, output.url or "")
+        return payload
 
     async def subscribe(self, job_id: str, ws: Any) -> None:
         async with self._sub_lock:
@@ -497,7 +526,20 @@ class JobManager:
         history: Dict[str, Any]
         ws_error: BaseException | None = None
         try:
-            await ws_task
+            if self.cfg.timeout_s > 0:
+                # Bound the push-based monitor too: a ComfyUI process that is
+                # alive at the TCP/WS layer but never executes or emits events
+                # would otherwise park this job (and its instance slot) in
+                # "queued" forever.
+                await asyncio.wait_for(ws_task, timeout=float(self.cfg.timeout_s))
+            else:
+                await ws_task
+        except asyncio.CancelledError:
+            # Cancellation (shutdown / scheduler stop) must propagate instead
+            # of falling into the history-poll fallback, which used to stall
+            # shutdown for up to TIMEOUT_S and leak the ws task.
+            ws_task.cancel()
+            raise
         except BaseException as exc:  # noqa: BLE001 - propagate after fallback
             ws_error = exc
         if ws_error is not None:
@@ -557,7 +599,12 @@ class JobManager:
             job_id,
             {
                 "type": "job_completed",
-                "data": {"url": primary, "outputs": [o.__dict__ for o in outputs]},
+                "data": {
+                    # Signed so browser <img>/<video> tags on the playground can
+                    # load the media straight from the WS event payload.
+                    "url": _signed_media_url(self.cfg, primary or "") or None,
+                    "outputs": [self._public_output(o) for o in outputs],
+                },
             },
         )
 

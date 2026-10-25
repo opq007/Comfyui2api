@@ -65,10 +65,10 @@ async def prune_jobs(
                 manager._subscribers.pop(job_id, None)
 
         for run_dir in removed_run_dirs:
-            try:
-                shutil.rmtree(run_dir, ignore_errors=True)
-            except Exception:
-                logger.exception("job run directory cleanup failed: path=%s", run_dir)
+            # ignore_errors=True means rmtree never raises, so no except is
+            # needed; run it in a worker thread so large trees cannot block
+            # the event loop.
+            await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
 
     return removed_job_ids
 

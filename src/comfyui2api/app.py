@@ -1123,8 +1123,21 @@ def create_app() -> FastAPI:
     async def job_ws(ws: WebSocket, job_id: str) -> None:
         try:
             _require_auth(cfg, _auth_value_from_ws(ws))
-        except HTTPException:
-            await ws.close(code=1008)
+        except HTTPException as exc:
+            # Accept first, then send a structured JSON error frame and close.
+            # Closing an unaccepted socket makes uvicorn answer the handshake
+            # with HTTP 403, so browsers only see a generic transport error.
+            await ws.accept()
+            try:
+                await ws.send_json(
+                    {
+                        "type": "error",
+                        "data": {"status": exc.status_code, "message": "Unauthorized"},
+                    }
+                )
+            except Exception:
+                pass
+            await ws.close(code=1008, reason="Unauthorized")
             return
         await ws.accept()
         job = await jobs.get_job(job_id)

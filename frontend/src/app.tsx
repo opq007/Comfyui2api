@@ -22,7 +22,7 @@ import {
 } from "./lib/api";
 import { clearAdminToken, getAdminToken, setAdminToken } from "./lib/auth";
 import { compactId } from "./lib/format";
-import { connectAdminSocket } from "./lib/websocket";
+import { connectAdminSocket, type AdminSocket } from "./lib/websocket";
 import { AppShell } from "./components/app-shell";
 import type { DashboardView } from "./components/app-shell";
 import { InstancesPanel, ModelsPanel } from "./components/backend-panels";
@@ -117,26 +117,7 @@ export function App(): React.ReactElement {
     if (authNeeded) return;
     let closed = false;
     let retryId = 0;
-    let socket = connectAdminSocket({
-      token: getAdminToken(),
-      onOpen: () => {
-        setLive(true);
-      },
-      onClose: () => {
-        setLive(false);
-        if (!closed) {
-          retryId = window.setTimeout(() => {
-            socket = connectAdminSocket({
-              token: getAdminToken(),
-              onOpen: () => setLive(true),
-              onClose: () => setLive(false),
-              onEvent: handleWsEvent
-            });
-          }, 2000);
-        }
-      },
-      onEvent: handleWsEvent
-    });
+    let socket: AdminSocket | null = null;
 
     function handleWsEvent(event: { type: string; data?: TaskListResponse; job?: TaskRecord }): void {
       if (event.type === "snapshot" && event.data) {
@@ -153,10 +134,28 @@ export function App(): React.ReactElement {
       }
     }
 
+    // Reconnect on every close (throttled), so the socket survives repeated
+    // drops instead of dying permanently after the first retry. The `closed`
+    // flag stops the chain when the effect unmounts.
+    const connect = (): void => {
+      socket = connectAdminSocket({
+        token: getAdminToken(),
+        onOpen: () => setLive(true),
+        onClose: () => {
+          setLive(false);
+          if (!closed) {
+            retryId = window.setTimeout(connect, 2000);
+          }
+        },
+        onEvent: handleWsEvent
+      });
+    };
+    connect();
+
     return () => {
       closed = true;
       window.clearTimeout(retryId);
-      socket.close();
+      socket?.close();
     };
   }, [authNeeded]);
 

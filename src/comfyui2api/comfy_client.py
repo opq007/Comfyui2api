@@ -90,6 +90,10 @@ class ComfyUIClient:
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         return _auth_headers(self.auth_token, extra)
 
+    @property
+    def object_info_cached(self) -> bool:
+        return self._object_info_cache is not None
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -110,6 +114,22 @@ class ComfyUIClient:
         except httpx.HTTPStatusError as e:
             raise ComfyApiError(_format_http_error("/queue", e)) from e
         return r.json()
+
+    async def delete_queue_entries(self, prompt_ids: list[str]) -> None:
+        """Remove queued (not yet executing) prompts from the ComfyUI queue.
+
+        Best-effort only: entries already executing are not interrupted, so
+        this never disturbs another client's running prompt.
+        """
+        ids = [str(item) for item in prompt_ids if str(item).strip()]
+        if not ids:
+            return
+        url = _join(self.base_url, "/queue")
+        r = await self._client.post(url, json={"delete": ids}, headers=self._headers({"Accept": "application/json"}))
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ComfyApiError(_format_http_error("/queue", e)) from e
 
     async def object_info(self, *, force: bool = False) -> Dict[str, Any]:
         async with self._object_info_lock:

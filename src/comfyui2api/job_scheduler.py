@@ -6,6 +6,9 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
+from websockets.exceptions import WebSocketException
+
 from .comfy_client import ComfyApiError, ComfyUIClient
 from .instance_pool import InstancePool
 from .util import utc_now_unix
@@ -19,6 +22,20 @@ logger = logging.getLogger(__name__)
 
 STAGED_PREFIX = "staged:"
 MAX_REROUTE = 1
+
+# Transport-level failures that should reroute a job to another instance
+# instead of failing it. httpx.ConnectError/ReadTimeout and websockets errors
+# are neither OSError nor builtin TimeoutError, so without them the reroute
+# path never fired for the most common failure (backend just went down).
+REROUTABLE_EXCEPTIONS = (
+    ComfyApiError,
+    OSError,
+    TimeoutError,
+    FileNotFoundError,
+    ValueError,
+    httpx.HTTPError,
+    WebSocketException,
+)
 
 
 class JobScheduler:
@@ -56,7 +73,19 @@ class JobScheduler:
     async def _loop(self) -> None:
         pool: InstancePool = self.manager.pool
         while True:
-            dispatched = await self._scan_once()
+            try:
+                dispatched = await self._scan_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A transient error (e.g. sqlite "database is locked") must not
+                # kill this task: nothing restarts it, and every queued job
+                # would stay pending forever — silently, without even a
+                # timeout failure, because timeout is only checked inside
+                # _scan_once.
+                logger.exception("job scheduler scan failed; retrying after wake interval")
+                dispatched = False
+                await asyncio.sleep(max(0.05, float(self.manager.cfg.scheduler_wake_interval_s)))
             if dispatched:
                 continue
             if self._wake is None:
@@ -81,6 +110,7 @@ class JobScheduler:
 
     async def _scan_once(self) -> bool:
         blocked_models: set[str] = set()
+        blocked_instance_slugs: set[str] = set()
         dispatched = False
         for job_id in list(self._queued):
             job = await self.manager.get_job(job_id)
@@ -114,12 +144,20 @@ class JobScheduler:
             ready = await self.manager.pool.ready_slugs(list(record.instance_slugs))
             if not ready:
                 blocked_models.add(job.model_slug)
+                blocked_instance_slugs.update(record.instance_slugs)
                 continue
             self._remove(job_id)
             task = asyncio.create_task(self._dispatch(job_id), name=f"job-run-{job_id[:8]}")
             self._running.add(task)
             task.add_done_callback(self._running.discard)
             dispatched = True
+        if blocked_instance_slugs:
+            # Queued jobs are blocked because no instance is ready. Kick the
+            # health probes now (throttled inside the pool) instead of letting
+            # the scheduler poll emptily until the next fixed probe tick.
+            kick = getattr(self.manager.pool, "kick_probes", None)
+            if callable(kick):
+                await kick(sorted(blocked_instance_slugs))
         return dispatched
 
     async def _live_check(self, job: Job) -> str:
@@ -185,10 +223,15 @@ class JobScheduler:
                     )
                     await self.manager._run_job(job_id, client=client)
                     return
-                except (ComfyApiError, OSError, TimeoutError, FileNotFoundError, ValueError) as exc:
+                except REROUTABLE_EXCEPTIONS as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
                     current = await self.manager.get_job(job_id)
                     if current is not None and current.prompt_id:
+                        # The prompt was already queued on ComfyUI and this job
+                        # is about to be failed: remove the queued entry so the
+                        # backend does not keep burning GPU on an abandoned
+                        # prompt. Entries already executing are left alone.
+                        await _cancel_comfy_prompt(client, current.prompt_id)
                         await self.manager.fail_job(job_id, last_error)
                         return
                     logger.info(
@@ -230,6 +273,16 @@ def _timed_out(job: Job, timeout_s: int) -> bool:
     if timeout_s <= 0:
         return False
     return utc_now_unix() - int(job.created_at) >= int(timeout_s)
+
+
+async def _cancel_comfy_prompt(client: ComfyUIClient, prompt_id: str) -> None:
+    cancel = getattr(client, "delete_queue_entries", None)
+    if not callable(cancel):
+        return
+    try:
+        await cancel([prompt_id])
+    except Exception:
+        logger.warning("failed to cancel queued ComfyUI prompt: prompt_id=%s", prompt_id, exc_info=True)
 
 
 def is_staged(value: str) -> bool:

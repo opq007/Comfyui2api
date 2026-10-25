@@ -986,9 +986,16 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(response.headers["content-type"], "video/mp4")
 
     def test_websocket_rejects_missing_auth(self) -> None:
-        with self.assertRaises(WebSocketDisconnect) as ctx:
-            with self.client.websocket_connect("/v1/jobs/missing-job/ws"):
-                pass
+        # The socket is accepted first, then closed with a structured JSON
+        # error frame (code 1008): closing an unaccepted socket used to make
+        # uvicorn answer the handshake with HTTP 403, so browsers only saw a
+        # generic transport error.
+        with self.client.websocket_connect("/v1/jobs/missing-job/ws") as ws:
+            payload = ws.receive_json()
+            with self.assertRaises(WebSocketDisconnect) as ctx:
+                ws.receive_json()
+        self.assertEqual(payload["type"], "error")
+        self.assertEqual(payload["data"]["status"], 401)
         self.assertEqual(ctx.exception.code, 1008)
 
     def test_websocket_accepts_query_token(self) -> None:

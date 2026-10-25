@@ -394,18 +394,20 @@ class BackendStore:
     def _has_task_sync(self, column: str, slug: str, statuses: Iterable[str]) -> bool:
         status_list = list(statuses)
         placeholders = ",".join("?" for _ in status_list)
-        try:
-            with closing(self._connect()) as con:
-                cols = {str(item[1]) for item in con.execute("PRAGMA table_info(tasks)").fetchall()}
-                if column not in cols:
-                    return False
-                row = con.execute(
-                    f"SELECT 1 FROM tasks WHERE {column} = ? AND status IN ({placeholders}) LIMIT 1",
-                    (slug, *status_list),
-                ).fetchone()
-            return row is not None
-        except sqlite3.OperationalError:
-            return False
+        # A missing tasks table/column legitimately means "no running jobs".
+        # PRAGMA never raises for a missing table (it just returns no rows).
+        # Anything else (e.g. "database is locked") propagates: swallowing it
+        # here used to turn a failed lookup into "no running jobs", which let
+        # instance deletion / base_url changes bypass the running-job guard.
+        with closing(self._connect()) as con:
+            cols = {str(item[1]) for item in con.execute("PRAGMA table_info(tasks)").fetchall()}
+            if column not in cols:
+                return False
+            row = con.execute(
+                f"SELECT 1 FROM tasks WHERE {column} = ? AND status IN ({placeholders}) LIMIT 1",
+                (slug, *status_list),
+            ).fetchone()
+        return row is not None
 
 
 def _instance_from_row(row: sqlite3.Row) -> InstanceRecord:
