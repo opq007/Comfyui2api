@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "kind": "img2img",
+  "prompt_node": "541.prompt",
+  "negative_prompt_node": "541.negative_prompt",
+  "image_node": "470.image",
+  "parameters": {
+    "size": {
+      "type": "size",
+      "description": "Output size as WIDTHxHEIGHT. Drives the empty latent and the reference image resize.",
+      "maps": [
+        {
+          "target": "535.value",
+          "part": "width"
+        },
+        {
+          "target": "536.value",
+          "part": "height"
+        }
+      ]
+    },
+    "width": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output width.",
+      "maps": [
+        {
+          "target": "535.value"
+        }
+      ]
+    },
+    "height": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output height.",
+      "maps": [
+        {
+          "target": "536.value"
+        }
+      ]
+    },
+    "n": {
+      "type": "int",
+      "minimum": 1,
+      "maximum": 16,
+      "description": "Number of images / latent batch size. The text-to-image branch only; image editing always returns one image per request.",
+      "maps": [
+        {
+          "target": "511.batch_size"
+        }
+      ]
+    },
+    "cfg": {
+      "type": "float",
+      "description": "CFG / guidance scale (workflow default 1.0).",
+      "maps": [
+        {
+          "target": "526.cfg"
+        }
+      ]
+    },
+    "seed": {
+      "type": "int",
+      "description": "Random seed. Omit or pass -1 to randomize each job.",
+      "maps": [
+        {
+          "target": "524.noise_seed"
+        }
+      ]
+    },
+    "image2": {
+      "type": "image",
+      "description": "Second reference image (images.image_2). Filled automatically from extra edit images.",
+      "maps": [
+        {
+          "target": "544.image"
+        }
+      ]
+    },
+    "image3": {
+      "type": "image",
+      "description": "Third reference image (images.image_3). Filled automatically from extra edit images.",
+      "maps": [
+        {
+          "target": "547.image"
+        }
+      ]
+    },
+    "inputImgCount": {
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "description": "Number of reference images. Auto-assigned from the actual edit image count; 0 is text-to-image.",
+      "maps": [
+        {
+          "target": "537.value"
+        }
+      ]
+    }
+  }
+}

@@ -328,6 +328,10 @@ comfyui-api-workflows/
 }
 ```
 
+> 💡 `prompt_node` / `negative_prompt_node` / `image_node` 用于显式指定节点（格式为 `节点ID.字段名`）。
+> 如果工作流内部按“是否有输入图”切换到不同的采样分支（AIO 工作流），可以再加 `negative_prompt_node_with_image`：有输入图时用该节点，无图时仍用 `negative_prompt_node`。
+> `inputImgCount` 这类图片计数字段由运行时按真实输入图片数自动补齐（无图为 0），sidecar 中写 `"default": 0` 即可。
+
 ### 3. 提交任务：动态替换提示词
 系统会自动猜测哪个节点是输入 Prompt。如果存在多个候选节点导致报错，只需在请求中显式指定 `prompt_node`（格式为 `节点ID.字段名`）。
 

@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "kind": "img2img",
+  "prompt_node": "41.value",
+  "negative_prompt_node": "47.text",
+  "negative_prompt_node_with_image": "36.prompt",
+  "image_node": "8.image",
+  "parameters": {
+    "size": {
+      "type": "size",
+      "description": "Output size as WIDTHxHEIGHT; the reference image is resized to it before encoding.",
+      "maps": [
+        {
+          "target": "56.value",
+          "part": "width"
+        },
+        {
+          "target": "57.value",
+          "part": "height"
+        }
+      ]
+    },
+    "width": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output width.",
+      "maps": [
+        {
+          "target": "56.value"
+        }
+      ]
+    },
+    "height": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output height.",
+      "maps": [
+        {
+          "target": "57.value"
+        }
+      ]
+    },
+    "n": {
+      "type": "int",
+      "minimum": 1,
+      "maximum": 16,
+      "description": "Number of images / latent batch size.",
+      "maps": [
+        {
+          "target": "28.batch_size"
+        }
+      ]
+    },
+    "steps": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Sampler steps, applied to both the text-to-image and image-to-image samplers.",
+      "maps": [
+        {
+          "target": "37.steps"
+        },
+        {
+          "target": "46.steps"
+        }
+      ]
+    },
+    "cfg": {
+      "type": "float",
+      "description": "CFG / guidance scale, applied to both samplers.",
+      "maps": [
+        {
+          "target": "37.cfg"
+        },
+        {
+          "target": "46.cfg"
+        }
+      ]
+    },
+    "seed": {
+      "type": "int",
+      "description": "Random seed. Omit or pass -1 to randomize each job.",
+      "maps": [
+        {
+          "target": "72.seed"
+        }
+      ]
+    },
+    "inputImgCount": {
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "description": "Number of reference images. Auto-assigned from the actual edit image count; 0 switches the workflow to its text-to-image sampler.",
+      "maps": [
+        {
+          "target": "52.value"
+        }
+      ]
+    }
+  }
+}

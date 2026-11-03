@@ -1,0 +1,546 @@
+{
+  "470": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "511": {
+    "inputs": {
+      "width": [
+        "535",
+        0
+      ],
+      "height": [
+        "536",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "512": {
+    "inputs": {
+      "samples": [
+        "525",
+        0
+      ],
+      "vae": [
+        "534",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "513": {
+    "inputs": {
+      "switch": [
+        "538",
+        0
+      ],
+      "on_false": [
+        "511",
+        0
+      ],
+      "on_true": [
+        "541",
+        2
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "514": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "548",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "Qwen Image 2.1 缓存",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "522": {
+    "inputs": {
+      "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "Manual Sigmas (Qwen-Image-2.1-Turbo 8-step schedule)",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "523": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSampler Select (euler)",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "524": {
+    "inputs": {
+      "noise_seed": 607431781605089
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Random Noise",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "525": {
+    "inputs": {
+      "noise": [
+        "524",
+        0
+      ],
+      "guider": [
+        "526",
+        0
+      ],
+      "sampler": [
+        "523",
+        0
+      ],
+      "sigmas": [
+        "522",
+        0
+      ],
+      "latent_image": [
+        "513",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sampler Custom Advanced",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "526": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "514",
+        0
+      ],
+      "positive": [
+        "541",
+        0
+      ],
+      "negative": [
+        "541",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG引导器",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "527": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "512",
+        0
+      ]
+    },
+    "class_type": "SaveImageAdvanced",
+    "_meta": {
+      "title": "保存图像（高级）",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "528": {
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default",
+      "device": "cuda:0"
+    },
+    "class_type": "UNETLoaderMultiGPU",
+    "_meta": {
+      "title": "UNETLoaderMultiGPU",
+      "cnr_id": "comfyui-multigpu",
+      "ver": "37a73feda5804045e4f39d8c640905d62a2169d1"
+    }
+  },
+  "529": {
+    "inputs": {
+      "lora_name": "qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "528",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "530": {
+    "inputs": {
+      "lora_name": "qwen-image-2.1-consistency.safetensors",
+      "strength_model": 1,
+      "model": [
+        "529",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "531": {
+    "inputs": {
+      "sage_attention": "sageattn_qk_int8_pv_fp16_cuda",
+      "allow_compile": false,
+      "model": [
+        "532",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "532": {
+    "inputs": {
+      "dtype": "fp16",
+      "model": [
+        "530",
+        0
+      ]
+    },
+    "class_type": "ModelComputeDtype",
+    "_meta": {
+      "title": "模型计算Dtype",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "533": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "type": "qwen_image",
+      "device": "cuda:0"
+    },
+    "class_type": "CLIPLoaderMultiGPU",
+    "_meta": {
+      "title": "CLIPLoaderMultiGPU",
+      "cnr_id": "comfyui-multigpu",
+      "ver": "37a73feda5804045e4f39d8c640905d62a2169d1"
+    }
+  },
+  "534": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+      "device": "cuda:0"
+    },
+    "class_type": "VAELoaderMultiGPU",
+    "_meta": {
+      "title": "VAELoaderMultiGPU",
+      "cnr_id": "comfyui-multigpu",
+      "ver": "37a73feda5804045e4f39d8c640905d62a2169d1"
+    }
+  },
+  "535": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "width",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6"
+    }
+  },
+  "536": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "height",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6"
+    }
+  },
+  "537": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "inputImgCount",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6"
+    }
+  },
+  "538": {
+    "inputs": {
+      "a_value": "",
+      "b_value": "0",
+      "operator": ">",
+      "a": [
+        "537",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: BooleanOperatorV2",
+    "_meta": {
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
+    }
+  },
+  "540": {
+    "inputs": {
+      "width": [
+        "535",
+        0
+      ],
+      "height": [
+        "536",
+        0
+      ],
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "stretch",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 32,
+      "device": "cpu",
+      "image": [
+        "470",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6"
+    }
+  },
+  "541": {
+    "inputs": {
+      "prompt": "将图片中角色替换成一只蓝色机器猫",
+      "negative_prompt": "",
+      "resolution": 0,
+      "clip": [
+        "533",
+        0
+      ],
+      "images.image_1": [
+        "550",
+        0
+      ],
+      "images.image_2": [
+        "543",
+        0
+      ],
+      "images.image_3": [
+        "546",
+        0
+      ],
+      "vae": [
+        "534",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "文本编码 Qwen Image 2.1",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "542": {
+    "inputs": {
+      "a_value": "",
+      "b_value": "1",
+      "operator": ">",
+      "a": [
+        "537",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: BooleanOperatorV2",
+    "_meta": {
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
+    }
+  },
+  "543": {
+    "inputs": {
+      "Default_Input": [
+        "542",
+        0
+      ],
+      "true_input": [
+        "544",
+        0
+      ]
+    },
+    "class_type": "OverrideSwitch",
+    "_meta": {
+      "title": "Override Switch",
+      "aux_id": "opq0007/ComfyUI-OverrideSwitch",
+      "ver": "bc52182b6019e46d21498b079d4a649b782a43d7"
+    }
+  },
+  "544": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像2",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "545": {
+    "inputs": {
+      "a_value": "",
+      "b_value": "2",
+      "operator": ">",
+      "a": [
+        "537",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: BooleanOperatorV2",
+    "_meta": {
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
+    }
+  },
+  "546": {
+    "inputs": {
+      "Default_Input": [
+        "545",
+        0
+      ],
+      "true_input": [
+        "547",
+        0
+      ]
+    },
+    "class_type": "OverrideSwitch",
+    "_meta": {
+      "title": "Override Switch",
+      "aux_id": "opq0007/ComfyUI-OverrideSwitch",
+      "ver": "bc52182b6019e46d21498b079d4a649b782a43d7"
+    }
+  },
+  "547": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像3",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "548": {
+    "inputs": {
+      "attention": "pytorch attention",
+      "model": [
+        "531",
+        0
+      ]
+    },
+    "class_type": "ModelAttentionBackend",
+    "_meta": {
+      "title": "模型注意力后端",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "549": {
+    "inputs": {
+      "a_value": "",
+      "b_value": "0",
+      "operator": ">",
+      "a": [
+        "537",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: BooleanOperatorV2",
+    "_meta": {
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
+    }
+  },
+  "550": {
+    "inputs": {
+      "Default_Input": [
+        "549",
+        0
+      ],
+      "true_input": [
+        "540",
+        0
+      ]
+    },
+    "class_type": "OverrideSwitch",
+    "_meta": {
+      "title": "Override Switch",
+      "aux_id": "opq0007/ComfyUI-OverrideSwitch",
+      "ver": "bc52182b6019e46d21498b079d4a649b782a43d7"
+    }
+  }
+}
