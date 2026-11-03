@@ -123,7 +123,7 @@ Docker: `API_TOKEN` + `ADMIN_TOKEN` required; maps **8460** (not 8000). Image `g
 - Python `>=3.11`. CI/compose use 3.13. Local tests have been run as 3.11.
 - `JOB_RETENTION_DAYS` (if set, including `0`) overrides `JOB_RETENTION_SECONDS`.
 - Restart marks in-flight jobs failed: `Task interrupted by server restart.`
-- Tests mock ComfyUI; set `ENABLE_WORKFLOW_WATCH=0`. `test_workflow_params.py` reads real files `comfyui-api-workflows/z_image_turbo_fp16.json` and `kaggle_flux2_klein_9b_kv_image_edit_api.json`.
+- Tests mock ComfyUI; set `ENABLE_WORKFLOW_WATCH=0`. `test_workflow_params.py` reads real files `comfyui-api-workflows/z_image_turbo_fp16.json`, `kaggle_flux2_klein_9b_kv_image_edit_api.json`, `qwen_image21_turbo_aio_api.json`, and `moss_image_aio_api.json` (the two AIO workflow tests skip when the workflow or sidecar is absent).
 - Two `test_admin_routes` cases skip unless `powershell` is on PATH (UTF-8 `.env` parser in `start.ps1`).
 - CI (`.github/workflows/release-windows.yml`) builds Windows onedir and smokes the EXEs; it does **not** run `unittest`.
 - PyInstaller: `comfyui2api.exe` (noconsole, `desktop_entry`) + `comfyui2api-cli.exe` (console). Spec silently omits UI if `webui_dist` is missing — always run frontend build first.

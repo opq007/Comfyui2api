@@ -65,7 +65,20 @@ class WorkflowParameterSpec:
     path: Path
     prompt_node: str = ""
     negative_prompt_node: str = ""
+    negative_prompt_node_with_image: str = ""
     image_node: str = ""
+
+    def negative_prompt_node_for(self, *, image_count: int = 0) -> str:
+        """Pick the negative-prompt target for the branch this request runs.
+
+        AIO workflows route text-to-image and image-to-image through different
+        samplers with their own negative encoders. `negative_prompt_node`
+        covers the no-image branch; `negative_prompt_node_with_image` wins as
+        soon as at least one reference image is supplied.
+        """
+        if image_count > 0 and self.negative_prompt_node_with_image:
+            return self.negative_prompt_node_with_image
+        return self.negative_prompt_node
 
 
 def parameter_sidecar_dir(workflows_dir: Path) -> Path:
@@ -300,6 +313,7 @@ def load_workflow_parameter_spec(
         path=path.resolve(),
         prompt_node=_normalize_string(obj.get("prompt_node")),
         negative_prompt_node=_normalize_string(obj.get("negative_prompt_node")),
+        negative_prompt_node_with_image=_normalize_string(obj.get("negative_prompt_node_with_image")),
         image_node=_normalize_string(obj.get("image_node")),
     )
 
@@ -514,34 +528,77 @@ def _append_candidate(
     )
 
 
+# Single source of truth for input-key aliases; `_CANONICAL_INPUT_KEYS` marks
+# the names that identify a parameter directly, the rest score as aliases.
+_NUMERIC_INPUT_PARAMETER: dict[str, str] = {
+    "width": "width",
+    "imagewidth": "width",
+    "latentwidth": "width",
+    "height": "height",
+    "imageheight": "height",
+    "latentheight": "height",
+    "steps": "steps",
+    "numsteps": "steps",
+    "cfg": "cfg",
+    "cfgscale": "cfg",
+    "guidance": "cfg",
+    "guidancescale": "cfg",
+    "seed": "seed",
+    "noiseseed": "seed",
+    "randomseed": "seed",
+    "fps": "fps",
+    "framerate": "fps",
+    "frames": "frames",
+    "numframes": "frames",
+    "framecount": "frames",
+    "duration": "duration",
+    "seconds": "duration",
+    "lengthseconds": "duration",
+    "batchsize": "n",
+    "batch": "n",
+    "n": "n",
+    "numimages": "n",
+    "imagecount": "n",
+}
+
+_CANONICAL_INPUT_KEYS = frozenset(
+    {"width", "height", "steps", "cfg", "seed", "fps", "frames", "duration", "seconds", "batchsize", "n"}
+)
+
+_CONSTANT_VALUE_INPUT_KEYS = frozenset({"value", "number", "num", "int", "integer", "float"})
+
+# Constant / primitive nodes expose a generic `value` input, so the parameter
+# name can only come from the node title. AIO workflows keep width, height and
+# the input image count in INTConstant nodes titled exactly that way.
+_CONSTANT_TITLE_PARAMETER_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("width", ("width", "宽度")),
+    ("height", ("height", "高度")),
+    ("steps", ("steps", "步数")),
+    ("cfg", ("cfg", "guidance", "引导")),
+    ("seed", ("seed", "随机种")),
+    ("fps", ("fps", "帧率")),
+    ("frames", ("frames", "帧数")),
+    ("duration", ("duration", "seconds", "时长")),
+    ("n", ("batch", "批量")),
+)
+
+
+@dataclass(frozen=True)
+class _NumericCandidate:
+    score: int
+    node_id: str
+    node: dict[str, Any]
+    input_key: str
+
+
 def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: str, title: str) -> int:
     score = 50
     norm = _normalize_input_key(input_key)
     title_l = title.lower()
     cls_l = class_type.lower()
 
-    exact_keys = {
-        "width": {"width"},
-        "height": {"height"},
-        "n": {"batchsize", "n"},
-        "steps": {"steps"},
-        "cfg": {"cfg"},
-        "seed": {"seed"},
-        "fps": {"fps"},
-        "frames": {"frames"},
-        "duration": {"duration", "seconds"},
-    }
-    aliases = {
-        "width": {"imagewidth", "latentwidth"},
-        "height": {"imageheight", "latentheight"},
-        "n": {"batch", "numimages", "imagecount"},
-        "steps": {"numsteps"},
-        "cfg": {"cfgscale", "guidance", "guidancescale"},
-        "seed": {"noiseseed", "randomseed"},
-        "fps": {"framerate"},
-        "frames": {"numframes", "framecount"},
-        "duration": {"lengthseconds"},
-    }
+    if _NUMERIC_INPUT_PARAMETER.get(norm) == parameter_name:
+        score += 20 if norm in _CANONICAL_INPUT_KEYS else 10
     semantic_tokens = {
         "size": ("latent", "image", "size"),
         "width": ("latent", "image", "size"),
@@ -554,11 +611,6 @@ def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: s
         "frames": ("video", "frame", "combine"),
         "duration": ("video", "duration", "seconds"),
     }
-
-    if norm in exact_keys.get(parameter_name, set()):
-        score += 20
-    elif norm in aliases.get(parameter_name, set()):
-        score += 10
     if any(token in title_l or token in cls_l for token in semantic_tokens.get(parameter_name, ())):
         score += 15
     if parameter_name in {"width", "height"} and "empty" in cls_l:
@@ -566,15 +618,67 @@ def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: s
     return score
 
 
+def _constant_title_parameter(node: dict[str, Any], input_key: str) -> str:
+    """Infer a standard parameter from the title of a constant-style node."""
+    if _normalize_input_key(input_key) not in _CONSTANT_VALUE_INPUT_KEYS:
+        return ""
+    title = get_node_title(node).strip().lower()
+    if not title:
+        return ""
+    normalized_title = _normalize_input_key(title)
+    for name, tokens in _CONSTANT_TITLE_PARAMETER_TOKENS:
+        for token in tokens:
+            if token in title or _normalize_input_key(token) in normalized_title:
+                return name
+    return ""
+
+
+def _append_size_candidate(
+    buckets: dict[str, list[dict[str, Any]]],
+    seen: dict[str, set[tuple[Any, ...]]],
+    *,
+    width: _NumericCandidate,
+    height: _NumericCandidate,
+    reason: str,
+) -> None:
+    _append_candidate(
+        buckets,
+        seen,
+        parameter_name="size",
+        score=width.score + height.score + 20,
+        reason=reason,
+        node_id=width.node_id,
+        node=width.node,
+        maps=[
+            _candidate_map_dict(width.node_id, width.node, width.input_key, part="width"),
+            _candidate_map_dict(height.node_id, height.node, height.input_key, part="height"),
+        ],
+    )
+
+
+def _node_consumers(prompt: dict[str, Any]) -> dict[str, set[str]]:
+    consumers: dict[str, set[str]] = {}
+    for source_id, node in prompt.items():
+        if not isinstance(source_id, str) or not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if isinstance(value, list) and value and isinstance(value[0], str):
+                consumers.setdefault(value[0], set()).add(source_id)
+    return consumers
+
+
 def detect_parameter_candidates(workflow_obj: Any) -> dict[str, list[dict[str, Any]]]:
     prompt, _extra_data = extract_prompt_and_extra(workflow_obj)
     buckets: dict[str, list[dict[str, Any]]] = {name: [] for name in STANDARD_PARAMETER_ORDER}
     seen: dict[str, set[tuple[Any, ...]]] = {}
 
-    width_entries: list[tuple[int, str, dict[str, Any], str]] = []
-    height_entries: list[tuple[int, str, dict[str, Any], str]] = []
-    fps_entries: list[tuple[int, str, dict[str, Any], str]] = []
-    frames_entries: list[tuple[int, str, dict[str, Any], str]] = []
+    width_entries: list[_NumericCandidate] = []
+    height_entries: list[_NumericCandidate] = []
+    fps_entries: list[_NumericCandidate] = []
+    frames_entries: list[_NumericCandidate] = []
 
     for node_id, node in prompt.items():
         if not isinstance(node_id, str) or not isinstance(node, dict):
@@ -585,162 +689,87 @@ def detect_parameter_candidates(workflow_obj: Any) -> dict[str, list[dict[str, A
 
         cls = as_str(node.get("class_type"))
         title = get_node_title(node)
-        node_width: list[tuple[int, str]] = []
-        node_height: list[tuple[int, str]] = []
+        node_width: list[_NumericCandidate] = []
+        node_height: list[_NumericCandidate] = []
 
         for input_key, value in inputs.items():
             if not isinstance(input_key, str) or not _is_numeric_value(value):
                 continue
-            normalized = _normalize_input_key(input_key)
+            parameter_name = _NUMERIC_INPUT_PARAMETER.get(_normalize_input_key(input_key), "")
+            matched_by_title = False
+            if not parameter_name:
+                parameter_name = _constant_title_parameter(node, input_key)
+                matched_by_title = bool(parameter_name)
+            if not parameter_name:
+                continue
 
-            def _matches(names: set[str]) -> bool:
-                return normalized in names
+            score = _score_input_candidate(parameter_name, input_key=input_key, class_type=cls, title=title)
+            if matched_by_title:
+                score += 10
+                reason = f"matched numeric constant input '{input_key}' via node title '{title}'"
+            else:
+                reason = f"matched numeric input '{input_key}'"
 
-            if _matches({"width", "imagewidth", "latentwidth"}):
-                score = _score_input_candidate("width", input_key=input_key, class_type=cls, title=title)
-                node_width.append((score, input_key))
-                width_entries.append((score, node_id, node, input_key))
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="width",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"height", "imageheight", "latentheight"}):
-                score = _score_input_candidate("height", input_key=input_key, class_type=cls, title=title)
-                node_height.append((score, input_key))
-                height_entries.append((score, node_id, node, input_key))
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="height",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"steps", "numsteps"}):
-                score = _score_input_candidate("steps", input_key=input_key, class_type=cls, title=title)
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="steps",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"cfg", "cfgscale", "guidance", "guidancescale"}):
-                score = _score_input_candidate("cfg", input_key=input_key, class_type=cls, title=title)
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="cfg",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"seed", "noiseseed", "randomseed"}):
-                score = _score_input_candidate("seed", input_key=input_key, class_type=cls, title=title)
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="seed",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"fps", "framerate"}):
-                score = _score_input_candidate("fps", input_key=input_key, class_type=cls, title=title)
-                fps_entries.append((score, node_id, node, input_key))
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="fps",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"frames", "numframes", "framecount"}):
-                score = _score_input_candidate("frames", input_key=input_key, class_type=cls, title=title)
-                frames_entries.append((score, node_id, node, input_key))
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="frames",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"duration", "seconds", "lengthseconds"}):
-                score = _score_input_candidate("duration", input_key=input_key, class_type=cls, title=title)
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="duration",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
-            elif _matches({"batchsize", "batch", "n", "numimages", "imagecount"}):
-                score = _score_input_candidate("n", input_key=input_key, class_type=cls, title=title)
-                _append_candidate(
-                    buckets,
-                    seen,
-                    parameter_name="n",
-                    score=score,
-                    reason=f"matched numeric input '{input_key}'",
-                    node_id=node_id,
-                    node=node,
-                    maps=[_candidate_map_dict(node_id, node, input_key)],
-                )
+            candidate = _NumericCandidate(score=score, node_id=node_id, node=node, input_key=input_key)
+            if parameter_name == "width":
+                node_width.append(candidate)
+                width_entries.append(candidate)
+            elif parameter_name == "height":
+                node_height.append(candidate)
+                height_entries.append(candidate)
+            elif parameter_name == "fps":
+                fps_entries.append(candidate)
+            elif parameter_name == "frames":
+                frames_entries.append(candidate)
 
-        if node_width and node_height:
-            width_score, width_key = sorted(node_width, key=lambda item: item[0], reverse=True)[0]
-            height_score, height_key = sorted(node_height, key=lambda item: item[0], reverse=True)[0]
             _append_candidate(
                 buckets,
                 seen,
-                parameter_name="size",
-                score=width_score + height_score + 20,
-                reason="paired width and height inputs on the same node",
+                parameter_name=parameter_name,
+                score=score,
+                reason=reason,
                 node_id=node_id,
                 node=node,
-                maps=[
-                    _candidate_map_dict(node_id, node, width_key, part="width"),
-                    _candidate_map_dict(node_id, node, height_key, part="height"),
-                ],
+                maps=[_candidate_map_dict(node_id, node, input_key)],
             )
 
-    best_fps = sorted(fps_entries, key=lambda item: item[0], reverse=True)
-    for frame_score, node_id, node, frame_key in sorted(frames_entries, key=lambda item: item[0], reverse=True):
-        same_node_fps = [item for item in best_fps if item[1] == node_id]
+        if node_width and node_height:
+            _append_size_candidate(
+                buckets,
+                seen,
+                width=max(node_width, key=lambda item: item.score),
+                height=max(node_height, key=lambda item: item.score),
+                reason="paired width and height inputs on the same node",
+            )
+
+    consumers = _node_consumers(prompt)
+    for width in width_entries:
+        for height in height_entries:
+            if width.node_id == height.node_id:
+                continue
+            if not (consumers.get(width.node_id) or set()) & (consumers.get(height.node_id) or set()):
+                continue
+            _append_size_candidate(
+                buckets,
+                seen,
+                width=width,
+                height=height,
+                reason="paired width and height inputs feeding the same node",
+            )
+
+    best_fps = sorted(fps_entries, key=lambda item: item.score, reverse=True)
+    for frame in sorted(frames_entries, key=lambda item: item.score, reverse=True):
+        same_node_fps = [item for item in best_fps if item.node_id == frame.node_id]
         paired = same_node_fps[0] if same_node_fps else (best_fps[0] if best_fps else None)
-        duration_score = frame_score + 15
+        duration_score = frame.score + 15
         reason = "convert duration seconds to frames"
         paired_ref = None
         if paired is not None:
-            duration_score += paired[0] // 2
-            paired_ref = f"{paired[1]}.{paired[3]}"
+            duration_score += paired.score // 2
+            paired_ref = f"{paired.node_id}.{paired.input_key}"
             reason = (
                 "convert duration seconds to frames using fps from the same node"
-                if paired[1] == node_id
+                if paired.node_id == frame.node_id
                 else "convert duration seconds to frames using the best fps candidate"
             )
         _append_candidate(
@@ -749,14 +778,14 @@ def detect_parameter_candidates(workflow_obj: Any) -> dict[str, list[dict[str, A
             parameter_name="duration",
             score=duration_score,
             reason=reason,
-            node_id=node_id,
-            node=node,
+            node_id=frame.node_id,
+            node=frame.node,
             paired_fps_ref=paired_ref,
             maps=[
                 _candidate_map_dict(
-                    node_id,
-                    node,
-                    frame_key,
+                    frame.node_id,
+                    frame.node,
+                    frame.input_key,
                     transform="seconds_to_frames",
                     fps_param="fps",
                     round_mode="ceil",
@@ -940,7 +969,12 @@ def public_parameter_spec(spec: WorkflowParameterSpec | None) -> dict[str, Any]:
             "version": 1,
             "kind": None,
             "path": None,
-            "input_targets": {"prompt_node": None, "negative_prompt_node": None, "image_node": None},
+            "input_targets": {
+                "prompt_node": None,
+                "negative_prompt_node": None,
+                "negative_prompt_node_with_image": None,
+                "image_node": None,
+            },
             "parameters": [],
         }
 
@@ -977,6 +1011,7 @@ def public_parameter_spec(spec: WorkflowParameterSpec | None) -> dict[str, Any]:
         "input_targets": {
             "prompt_node": spec.prompt_node or None,
             "negative_prompt_node": spec.negative_prompt_node or None,
+            "negative_prompt_node_with_image": spec.negative_prompt_node_with_image or None,
             "image_node": spec.image_node or None,
         },
         "parameters": items,

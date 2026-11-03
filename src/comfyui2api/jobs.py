@@ -53,6 +53,22 @@ def _signed_media_url(cfg: Config, url: str) -> str:
     return f"{path}?{urlencode(signed)}"
 
 
+def _request_image_count(params: Dict[str, Any], *, has_image: bool) -> int:
+    """Reference image count for this request.
+
+    AIO workflows select their branch from it. Prefer the count computed by
+    `extra_edit_image_params` on multi-image paths, and fall back to the
+    supplied primary image for endpoints that never call it.
+    """
+    raw = params.get("inputImgCount")
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return 1 if has_image else 0
+
+
 @dataclass
 class JobOutput:
     filename: str
@@ -446,10 +462,21 @@ class JobManager:
         )
 
         spec = wf.parameter_spec
-        positive_prompt_node = job.prompt_node or (spec.prompt_node if spec is not None else "") or None
-        negative_prompt_node = job.negative_prompt_node or (spec.negative_prompt_node if spec is not None else "") or None
-        image_node = job.image_node or (spec.image_node if spec is not None else "") or None
         request_params = dict(job.standard_params or {})
+        image_count = _request_image_count(request_params, has_image=bool(job.image))
+        if spec is not None and "inputImgCount" in spec.parameters and "inputImgCount" not in request_params:
+            # Chat and variations endpoints never call extra_edit_image_params,
+            # but AIO workflows select their branch from this count. Derive it
+            # from what was actually supplied instead of letting the sidecar
+            # default pin the wrong branch.
+            request_params["inputImgCount"] = image_count
+        positive_prompt_node = job.prompt_node or (spec.prompt_node if spec is not None else "") or None
+        # AIO workflows switch sampler *and* negative encoder on the image
+        # count, so the sidecar supplies one negative target per branch.
+        negative_prompt_node = job.negative_prompt_node or (
+            spec.negative_prompt_node_for(image_count=image_count) if spec is not None else ""
+        ) or None
+        image_node = job.image_node or (spec.image_node if spec is not None else "") or None
         if spec is not None and "seed" in spec.parameters:
             raw_seed = request_params.get("seed")
             if raw_seed in (None, "", -1, "-1"):

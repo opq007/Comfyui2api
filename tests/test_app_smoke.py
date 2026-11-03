@@ -1133,6 +1133,78 @@ class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["image_node"], "167.image")
         self.assertIsNone(kwargs["negative_prompt_node"])
 
+    async def test_run_job_selects_negative_prompt_node_by_image_count(self) -> None:
+        import comfyui2api.jobs as jobs_module
+        from comfyui2api.workflow_params import (
+            WorkflowParameterDefinition,
+            WorkflowParameterSpec,
+            WorkflowParamTarget,
+        )
+
+        from tests.helpers import fake_job_deps
+
+        client = SimpleNamespace(
+            object_info=AsyncMock(return_value={}),
+            queue_prompt=AsyncMock(side_effect=RuntimeError("stop")),
+        )
+        deps = fake_job_deps(client=client, runs_dir=Path("."))
+        manager = jobs_module.JobManager(
+            cfg=deps.cfg,
+            registry=SimpleNamespace(),
+            pool=deps.pool,
+            backend=deps.backend,
+        )
+
+        spec = WorkflowParameterSpec(
+            version=1,
+            kind="img2img",
+            parameters={
+                "inputImgCount": WorkflowParameterDefinition(
+                    name="inputImgCount",
+                    type="int",
+                    default=0,
+                    minimum=0,
+                    maps=(WorkflowParamTarget(ref="52.value"),),
+                )
+            },
+            path=Path("aio.params.json"),
+            prompt_node="41.value",
+            negative_prompt_node="47.text",
+            negative_prompt_node_with_image="36.prompt",
+            image_node="8.image",
+        )
+        workflow = SimpleNamespace(
+            name="aio.json",
+            parameter_spec=spec,
+            clone_obj=lambda: {"prompt": {"8": {"class_type": "LoadImage", "inputs": {"image": "input.png"}}}},
+        )
+
+        cases = (
+            ({"inputImgCount": 1}, "comfyui2api/input.png", "36.prompt", 1),
+            ({"inputImgCount": 0}, "", "47.text", 0),
+            # No endpoint-computed count (chat/variations path): the supplied
+            # image must still select the image branch.
+            ({}, "comfyui2api/input.png", "36.prompt", 1),
+            ({}, "", "47.text", 0),
+        )
+        for standard_params, image, expected_node, expected_count in cases:
+            job = await manager.create_job(
+                kind="img2img",
+                workflow="aio.json",
+                prompt="hello",
+                image=image,
+                standard_params=dict(standard_params),
+            )
+            with patch.object(manager, "_resolve_workflow", AsyncMock(return_value=workflow)), patch.object(
+                jobs_module, "prepare_prompt", return_value=({}, None, [], {})
+            ) as mock_prepare:
+                with self.assertRaises(RuntimeError):
+                    await manager._run_job(job.job_id, client=client)
+
+            kwargs = mock_prepare.call_args.kwargs
+            self.assertEqual(kwargs["negative_prompt_node"], expected_node)
+            self.assertIn(("52", "value", expected_count), kwargs["overrides"])
+
     async def test_fail_job_records_error_and_sets_done(self) -> None:
         import comfyui2api.jobs as jobs_module
         from tests.helpers import fake_job_deps

@@ -308,6 +308,164 @@ class WorkflowParameterMappingTests(unittest.TestCase):
         self.assertIn(("191", "image", "uploads/last.png"), three_images)
         self.assertFalse(any(item[0] == "image3" or item[2] == "uploads/extra.png" for item in three_images))
 
+    def test_qwen_image21_aio_sidecar_maps_constants_images_and_count(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "qwen_image21_turbo_aio_api.json"
+        sidecar_path = workflows_dir / ".comfyui2api" / f"{workflow_path.stem}.params.json"
+        if not workflow_path.exists() or not sidecar_path.exists():
+            self.skipTest(f"Workflow fixture not present: {workflow_path.name}")
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "541.prompt")
+        self.assertEqual(spec.negative_prompt_node, "541.negative_prompt")
+        self.assertEqual(spec.image_node, "470.image")
+        # Fixed 8-step ManualSigmas schedule: there is no sampler steps input.
+        self.assertNotIn("steps", spec.parameters)
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "size": "768x1024",
+                "n": 2,
+                "cfg": 1.5,
+                "seed": 42,
+                "image2": "uploads/second.png",
+                "image3": "uploads/third.png",
+                "inputImgCount": 3,
+            },
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("535", "value", 768),
+                ("536", "value", 1024),
+                ("511", "batch_size", 2),
+                ("526", "cfg", 1.5),
+                ("524", "noise_seed", 42),
+                ("544", "image", "uploads/second.png"),
+                ("547", "image", "uploads/third.png"),
+                ("537", "value", 3),
+            ],
+        )
+
+        text_only = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertEqual(text_only, [("537", "value", 0)])
+
+    def test_moss_image_aio_sidecar_routes_negative_and_branch_params(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "moss_image_aio_api.json"
+        sidecar_path = workflows_dir / ".comfyui2api" / f"{workflow_path.stem}.params.json"
+        if not workflow_path.exists() or not sidecar_path.exists():
+            self.skipTest(f"Workflow fixture not present: {workflow_path.name}")
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "41.value")
+        self.assertEqual(spec.negative_prompt_node, "47.text")
+        self.assertEqual(spec.negative_prompt_node_with_image, "36.prompt")
+        self.assertEqual(spec.image_node, "8.image")
+        self.assertEqual(spec.negative_prompt_node_for(image_count=0), "47.text")
+        self.assertEqual(spec.negative_prompt_node_for(image_count=1), "36.prompt")
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "size": "1344x768",
+                "n": 2,
+                "steps": 8,
+                "cfg": 1.2,
+                "seed": 7,
+                "inputImgCount": 1,
+            },
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("56", "value", 1344),
+                ("57", "value", 768),
+                ("28", "batch_size", 2),
+                ("37", "steps", 8),
+                ("46", "steps", 8),
+                ("37", "cfg", 1.2),
+                ("46", "cfg", 1.2),
+                ("72", "seed", 7),
+                ("52", "value", 1),
+            ],
+        )
+
+        text_only = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertEqual(text_only, [("52", "value", 0)])
+
+    def test_detection_infers_constant_node_parameters_and_pairs_size(self) -> None:
+        workflow_obj = {
+            "prompt": {
+                "1": {"class_type": "INTConstant", "inputs": {"value": 720}, "_meta": {"title": "width"}},
+                "2": {"class_type": "INTConstant", "inputs": {"value": 1280}, "_meta": {"title": "height"}},
+                "3": {
+                    "class_type": "EmptyLatentImage",
+                    "inputs": {"width": ["1", 0], "height": ["2", 0], "batch_size": 1},
+                },
+                "4": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20, "cfg": 4}},
+                "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0]}},
+                "6": {"class_type": "INTConstant", "inputs": {"value": 4}, "_meta": {"title": "batch_size"}},
+            }
+        }
+
+        detected = detect_parameter_candidates(workflow_obj)
+        self.assertEqual(detected["width"][0]["maps"][0]["ref"], "1.value")
+        self.assertEqual(detected["height"][0]["maps"][0]["ref"], "2.value")
+        self.assertEqual(detected["size"][0]["maps"][0]["ref"], "1.value")
+        self.assertEqual(detected["size"][0]["maps"][1]["ref"], "2.value")
+        self.assertEqual(detected["size"][0]["maps"][0]["part"], "width")
+        self.assertEqual(detected["size"][0]["maps"][1]["part"], "height")
+        self.assertEqual(detected["n"][0]["maps"][0]["ref"], "3.batch_size")
+        self.assertIn("6.value", [m["ref"] for entry in detected["n"] for m in entry["maps"]])
+        self.assertEqual(detected["steps"][0]["maps"][0]["ref"], "4.steps")
+
+        template = generate_parameter_template(workflow_obj=workflow_obj, kind="txt2img")
+        self.assertEqual(template["parameters"]["size"]["default"], "720x1280")
+        self.assertEqual(template["parameters"]["width"]["default"], 720)
+        self.assertEqual(template["parameters"]["height"]["default"], 1280)
+
+    def test_detection_pairs_width_and_height_across_nodes(self) -> None:
+        # Width and height live on different primitive nodes but feed the same
+        # latent node; the pair must be detected even though neither node is a
+        # titled constant.
+        workflow_obj = {
+            "prompt": {
+                "1": {"class_type": "PrimitiveInt", "inputs": {"width": 512}},
+                "2": {"class_type": "PrimitiveInt", "inputs": {"height": 768}},
+                "3": {
+                    "class_type": "EmptyLatentImage",
+                    "inputs": {"width": ["1", 0], "height": ["2", 0], "batch_size": 1},
+                },
+            }
+        }
+
+        detected = detect_parameter_candidates(workflow_obj)
+        self.assertEqual(detected["size"][0]["maps"][0]["ref"], "1.width")
+        self.assertEqual(detected["size"][0]["maps"][1]["ref"], "2.height")
+        self.assertEqual(detected["size"][0]["reason"], "paired width and height inputs feeding the same node")
+        self.assertEqual(detected["width"][0]["maps"][0]["ref"], "1.width")
+        self.assertEqual(detected["height"][0]["maps"][0]["ref"], "2.height")
+
     def test_apply_img2img_resize_params_forces_flag_from_complete_size(self) -> None:
         self.assertEqual(apply_img2img_resize_params({}), {"resizeFlag": False})
         self.assertEqual(

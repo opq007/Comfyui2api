@@ -80,6 +80,44 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
             },
         )
 
+    def test_prepare_prompt_routes_negative_to_negative_prompt_key(self) -> None:
+        # TextEncodeQwenImage21 carries both prompts on one node, and the
+        # CFGGuider feeds outputs 0/1 of it as positive/negative.
+        workflow = {
+            "prompt": {
+                "541": {
+                    "class_type": "TextEncodeQwenImage21",
+                    "inputs": {"prompt": "old positive", "negative_prompt": "old negative", "clip": ["533", 0]},
+                    "_meta": {"title": "文本编码 Qwen Image 2.1"},
+                },
+                "526": {
+                    "class_type": "CFGGuider",
+                    "inputs": {"cfg": 1, "positive": ["541", 0], "negative": ["541", 1]},
+                    "_meta": {"title": "CFG引导器"},
+                },
+            }
+        }
+
+        prompt, _extra_data, applied, trace = prepare_prompt(
+            workflow_obj=workflow,
+            positive_prompt="new positive",
+            negative_prompt="new negative",
+            positive_prompt_node=None,
+            negative_prompt_node=None,
+            image=None,
+            image_node=None,
+            overrides=[],
+        )
+
+        self.assertEqual(
+            applied,
+            [("541", "prompt", "new positive"), ("541", "negative_prompt", "new negative")],
+        )
+        self.assertEqual(prompt["541"]["inputs"]["prompt"], "new positive")
+        self.assertEqual(prompt["541"]["inputs"]["negative_prompt"], "new negative")
+        self.assertEqual(trace["positive"][0]["input_key"], "prompt")
+        self.assertEqual(trace["negative"][0]["input_key"], "negative_prompt")
+
     def test_prepare_prompt_reports_effective_prompt_targets(self) -> None:
         workflow = {
             "prompt": {

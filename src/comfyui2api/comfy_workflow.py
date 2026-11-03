@@ -116,21 +116,25 @@ def get_node_title(node: Dict[str, Any]) -> str:
     return ""
 
 
+# Input keys to follow for each prompt polarity, most specific first. Encoders
+# such as TextEncodeQwenImage21 expose `prompt` + `negative_prompt` on one node,
+# so the negative pass must not fall back to the positive key.
+_PROMPT_KEY_ORDER: Dict[str, Tuple[str, ...]] = {
+    "positive": ("positive_prompt", "positive", "text", "value", "prompt", "string"),
+    "negative": ("negative_prompt", "negative", "neg", "text", "value", "prompt", "string"),
+}
+
+
 def find_text_prompt_targets(
     prompt: Dict[str, Any],
 ) -> Tuple[List[Tuple[str, str, str, str]], List[Tuple[str, str, str, str]]]:
-    pos: List[Tuple[str, str, str, str]] = []
-    neg: List[Tuple[str, str, str, str]] = []
+    targets: Dict[str, List[Tuple[str, str, str, str]]] = {"positive": [], "negative": []}
     generic: List[Tuple[str, str, str, str]] = []
 
     def add(kind: str, node_id: str, input_key: str, cls: str, title: str) -> None:
         item = (node_id, input_key, cls, title)
-        if kind == "pos":
-            if item not in pos:
-                pos.append(item)
-        else:
-            if item not in neg:
-                neg.append(item)
+        if item not in targets[kind]:
+            targets[kind].append(item)
 
     def add_generic(node_id: str, input_key: str, cls: str, title: str) -> None:
         item = (node_id, input_key, cls, title)
@@ -151,11 +155,9 @@ def find_text_prompt_targets(
             if not isinstance(inputs, dict):
                 return None
 
-            preferred_keys: List[str] = []
-            # Follow semantically relevant links only; avoid unrelated inputs like frame_rate/expression.
-            for key in (kind, "text", "value", "prompt", "string"):
-                if key in inputs:
-                    preferred_keys.append(key)
+            # Follow semantically relevant links only; avoid unrelated inputs
+            # like frame_rate/expression.
+            preferred_keys: List[str] = [key for key in _PROMPT_KEY_ORDER[kind] if key in inputs]
 
             next_node_id: Optional[str] = None
             for key in preferred_keys:
@@ -190,10 +192,10 @@ def find_text_prompt_targets(
         preferred_key = "text" if "text" in inputs and isinstance(inputs.get("text"), str) else string_inputs[0]
 
         if "negative" in title_l or "neg" in title_l:
-            add("neg", node_id, preferred_key, cls, title)
+            add("negative", node_id, preferred_key, cls, title)
             continue
         if "positive" in title_l or "pos" in title_l:
-            add("pos", node_id, preferred_key, cls, title)
+            add("positive", node_id, preferred_key, cls, title)
             continue
 
         if is_encode:
@@ -214,17 +216,14 @@ def find_text_prompt_targets(
             if not resolved:
                 continue
             node_id, input_key, cls, title = resolved
-            if key == "positive":
-                add("pos", node_id, input_key, cls, title)
-            else:
-                add("neg", node_id, input_key, cls, title)
+            add(key, node_id, input_key, cls, title)
 
-    if not pos:
-        pos.extend(generic)
-    if not neg:
-        neg.extend(generic)
+    if not targets["positive"]:
+        targets["positive"].extend(generic)
+    if not targets["negative"]:
+        targets["negative"].extend(generic)
 
-    return pos, neg
+    return targets["positive"], targets["negative"]
 
 
 def find_load_image_targets(prompt: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
