@@ -1,0 +1,261 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "VoxCPM2",
+      "lora_name": "None",
+      "text": [
+        "18",
+        0
+      ],
+      "voice_design": "",
+      "cfg": 2,
+      "steps": 10,
+      "normalize_text": false,
+      "seed": 1083016376721649,
+      "force_offload": false,
+      "device": "cuda:1",
+      "dtype": "fp16",
+      "download_progress": "",
+      "voice_config": [
+        "3",
+        0
+      ],
+      "advanced_params": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "VoxCPM_TTS",
+    "_meta": {
+      "title": "VoxCPM TTS",
+      "aux_id": "opq007/ComfyUI-VoxCPM",
+      "ver": "e2157479d5c4355dad672c2a2979b4f32a727cf8"
+    }
+  },
+  "2": {
+    "inputs": {
+      "min_tokens": 2,
+      "max_tokens": 2048,
+      "temperature": 1,
+      "sway": 1,
+      "use_cfg_zero_star": true,
+      "retry_max_attempts": 3,
+      "retry_threshold": 6,
+      "download_progress": ""
+    },
+    "class_type": "VoxCPM_AdvancedParams",
+    "_meta": {
+      "title": "VoxCPM Advanced Parameters",
+      "aux_id": "opq007/ComfyUI-VoxCPM",
+      "ver": "e2157479d5c4355dad672c2a2979b4f32a727cf8"
+    }
+  },
+  "3": {
+    "inputs": {
+      "trim_silence": false,
+      "prompt_text": "从什么时候起，愉悦变成了有一点距离感的词。",
+      "download_progress": "",
+      "prompt_audio": [
+        "5",
+        0
+      ],
+      "reference_audio": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "VoxCPM_VoiceCloning",
+    "_meta": {
+      "title": "VoxCPM Voice Cloning",
+      "aux_id": "opq007/ComfyUI-VoxCPM",
+      "ver": "e2157479d5c4355dad672c2a2979b4f32a727cf8"
+    }
+  },
+  "4": {
+    "inputs": {
+      "switch": [
+        "6",
+        0
+      ],
+      "on_false": [
+        "15",
+        0
+      ],
+      "on_true": [
+        "14",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "切换",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "5": {
+    "inputs": {
+      "audio_file": [
+        "4",
+        0
+      ],
+      "seek_seconds": 0,
+      "duration": 15
+    },
+    "class_type": "VHS_LoadAudio",
+    "_meta": {
+      "title": "Load Audio (Path)🎥🅥🅗🅢",
+      "cnr_id": "comfyui-videohelpersuite",
+      "ver": "4d907bee61e92c2e65af3bd6383a4e4d356126d1"
+    }
+  },
+  "6": {
+    "inputs": {
+      "file_path": [
+        "8",
+        0
+      ],
+      "file_name": [
+        "7",
+        0
+      ],
+      "file_extension": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "easy isFileExist",
+    "_meta": {
+      "title": "文件是否存在",
+      "cnr_id": "comfyui-easy-use",
+      "ver": "b0b47ca1372117fce575d9e744655344ebff6bef"
+    }
+  },
+  "7": {
+    "inputs": {
+      "string": "lyf"
+    },
+    "class_type": "StringConstant",
+    "_meta": {
+      "title": "音色id",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "8": {
+    "inputs": {
+      "string": "input"
+    },
+    "class_type": "StringConstant",
+    "_meta": {
+      "title": "文件路径",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "9": {
+    "inputs": {
+      "string": ".mp3"
+    },
+    "class_type": "StringConstant",
+    "_meta": {
+      "title": "声音后缀",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "13": {
+    "inputs": {
+      "delimiter": "/",
+      "string1": [
+        "8",
+        0
+      ],
+      "string2": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "JoinStrings",
+    "_meta": {
+      "title": "Join Strings",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "14": {
+    "inputs": {
+      "delimiter": "",
+      "string1": [
+        "13",
+        0
+      ],
+      "string2": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "JoinStrings",
+    "_meta": {
+      "title": "Join Strings",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "15": {
+    "inputs": {
+      "string": "input/lyf_从什么时候起，愉悦变成了有一点距离感的词.mp3"
+    },
+    "class_type": "StringConstant",
+    "_meta": {
+      "title": "默认声音",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
+    }
+  },
+  "17": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "format": "mp3",
+      "format.quality": "V0",
+      "audio": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAdvanced",
+    "_meta": {
+      "title": "保存音频（高级）",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "18": {
+    "inputs": {
+      "value": "这是一个测试tts的输入文本"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "tts_prompt",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "19": {
+    "inputs": {
+      "speed": 1,
+      "duration": 0,
+      "method": "keep pitch",
+      "audio": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "WASAudioTimeStretch",
+    "_meta": {
+      "title": "Audio Time Stretch",
+      "cnr_id": "was-node-suite-comfyui",
+      "ver": "715e2c934a926002c996a028318255df1cce24c0"
+    }
+  }
+}

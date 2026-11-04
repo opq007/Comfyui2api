@@ -27,3 +27,7 @@ class ConflictError(ValueError):
 
 class ValidationError(ValueError):
     """Raised when an admin mutation fails field or enablement checks."""
+
+
+class InvalidParameterError(ValueError):
+    """Raised when a request parameter fails its workflow sidecar's type or range check."""

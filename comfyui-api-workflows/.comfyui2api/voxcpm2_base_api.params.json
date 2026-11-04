@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "kind": "txt2audio",
+  "prompt_node": "18.value",
+  "parameters": {
+    "steps": {
+      "type": "int",
+      "minimum": 1,
+      "description": "TTS sampling steps.",
+      "maps": [
+        {
+          "target": "1.steps"
+        }
+      ]
+    },
+    "cfg": {
+      "type": "float",
+      "minimum": 0,
+      "description": "CFG scale for the TTS model.",
+      "maps": [
+        {
+          "target": "1.cfg"
+        }
+      ]
+    },
+    "seed": {
+      "type": "int",
+      "description": "Random seed. Omit or pass -1 to randomize each job.",
+      "maps": [
+        {
+          "target": "1.seed"
+        }
+      ]
+    },
+    "voice": {
+      "type": "string",
+      "description": "Voice id resolved to input/<voice>.mp3 as the cloning reference. Unknown ids fall back to the workflow's default reference audio.",
+      "maps": [
+        {
+          "target": "7.string"
+        }
+      ]
+    },
+    "speed": {
+      "type": "float",
+      "minimum": 0.25,
+      "maximum": 4,
+      "description": "Playback speed multiplier in the OpenAI 0.25-4.0 range. Mapped to the WAS time-stretch node, which keeps the original pitch.",
+      "maps": [
+        {
+          "target": "19.speed"
+        }
+      ]
+    },
+    "instructions": {
+      "type": "string",
+      "description": "OpenAI TTS style instructions, mapped to the VoxCPM voice_design prompt (natural-language voice description).",
+      "maps": [
+        {
+          "target": "1.voice_design"
+        }
+      ]
+    },
+    "prompt_text": {
+      "type": "string",
+      "description": "Transcript of the reference audio used for cloning. Keep it in sync when switching voice; omit to keep the workflow's baked-in transcript.",
+      "maps": [
+        {
+          "target": "3.prompt_text"
+        }
+      ]
+    }
+  }
+}

@@ -24,7 +24,7 @@ from .instance_pool import InstancePool
 from .job_scheduler import JobScheduler
 from .signed_urls import create_signed_query, signing_secret
 from .util import guess_media_type, json_dumps, pick_primary_url, sanitize_filename_part, utc_now_iso, utc_now_unix
-from .workflow_params import apply_img2img_resize_params, resolve_standard_overrides
+from .workflow_params import apply_img2img_resize_params, normalize_standard_params, resolve_standard_overrides
 from .workflow_registry import WorkflowDefinition, WorkflowRegistry
 
 
@@ -189,6 +189,11 @@ class JobManager:
         params = dict(standard_params or {})
         if str(kind or "").strip().lower() == "img2img":
             params = apply_img2img_resize_params(params)
+        # Every endpoint funnels through here, so standard params are validated
+        # and coerced once, before enqueue: a bad value (e.g. speed outside the
+        # sidecar's range) is a request-time InvalidParameterError instead of a
+        # failed job. Explicit `overrides` stay raw node writes and are exempt.
+        params = normalize_standard_params(spec=await self._parameter_spec(workflow), request_params=params)
         job = Job(
             job_id=job_id,
             created_at_utc=utc_now_iso(),
@@ -434,6 +439,22 @@ class JobManager:
             if item.name.lower() == name.lower():
                 return item
         raise FileNotFoundError(f"Workflow not found: {name}")
+
+    async def _parameter_spec(self, workflow: str) -> Any:
+        """Sidecar spec for a workflow name, or None when it cannot be resolved.
+
+        Resolves exactly like `_run_job`, so validation and execution agree on
+        which sidecar a job runs against. Test managers pass a bare registry
+        stub; with nothing to resolve, the request-time check is skipped and
+        the run-time resolution still normalizes what reached the job.
+        """
+        if not callable(getattr(self.registry, "get", None)):
+            return None
+        try:
+            wf = await self._resolve_workflow(workflow)
+        except FileNotFoundError:
+            return None
+        return wf.parameter_spec
 
     async def _run_job(self, job_id: str, *, client: ComfyUIClient) -> None:
         job = await self.get_job(job_id)

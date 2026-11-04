@@ -12,14 +12,17 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from comfyui2api.errors import InvalidParameterError
 from comfyui2api.workflow_params import (
     WorkflowParameterDefinition,
+    WorkflowParameterSpec,
     WorkflowParamTarget,
     apply_img2img_resize_params,
     detect_parameter_candidates,
     generate_parameter_template,
     load_workflow_parameter_spec,
     normalize_parameter_value,
+    normalize_standard_params,
     resolve_standard_overrides,
 )
 
@@ -308,6 +311,64 @@ class WorkflowParameterMappingTests(unittest.TestCase):
         self.assertIn(("191", "image", "uploads/last.png"), three_images)
         self.assertFalse(any(item[0] == "image3" or item[2] == "uploads/extra.png" for item in three_images))
 
+    def test_bundled_sidecars_resolve_against_their_workflows(self) -> None:
+        # Regression guard: re-exporting a bundled workflow must not orphan the
+        # node ids its sidecar maps, otherwise the mapping silently stops
+        # applying (the job just runs with the workflow's baked-in values).
+        from comfyui2api.comfy_workflow import detect_capabilities, extract_prompt_and_extra, parse_node_input_ref
+
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        sidecar_dir = workflows_dir / ".comfyui2api"
+        sidecars = sorted(sidecar_dir.glob("*.params.json")) if sidecar_dir.is_dir() else []
+        if not sidecars:
+            self.skipTest("Bundled workflow sidecars not present")
+
+        for sidecar_path in sidecars:
+            workflow_path = workflows_dir / f"{sidecar_path.name[: -len('.params.json')]}.json"
+            if not workflow_path.exists():
+                self.fail(f"{sidecar_path.name} has no matching workflow {workflow_path.name}")
+            with self.subTest(sidecar=sidecar_path.name):
+                workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+                prompt, _extra = extract_prompt_and_extra(workflow_obj)
+                spec = load_workflow_parameter_spec(
+                    workflows_dir=workflows_dir,
+                    workflow_path=workflow_path,
+                    expected_kind=detect_capabilities(prompt).kind,
+                )
+                self.assertIsNotNone(spec)
+                assert spec is not None
+
+                refs: list[tuple[str, str, str]] = [
+                    ("prompt_node", spec.prompt_node, "text"),
+                    ("negative_prompt_node", spec.negative_prompt_node, "text"),
+                    ("negative_prompt_node_with_image", spec.negative_prompt_node_with_image, "text"),
+                    ("image_node", spec.image_node, "image"),
+                ]
+                for parameter_name, definition in spec.parameters.items():
+                    for mapping in definition.maps:
+                        # A map may target a ref or a selector; both are legal.
+                        if not mapping.ref:
+                            self.assertIsNotNone(mapping.selector, f"{parameter_name} needs a ref or selector")
+                            continue
+                        refs.append((parameter_name, mapping.ref, "value"))
+
+                for label, ref, default_input in refs:
+                    if not ref:
+                        continue
+                    node_id, input_key = parse_node_input_ref(ref, default_input=default_input)
+                    node = prompt.get(node_id)
+                    self.assertIsInstance(node, dict, f"{label} {ref!r}: node {node_id!r} is missing")
+                    assert isinstance(node, dict)
+                    inputs = node.get("inputs")
+                    self.assertIsInstance(inputs, dict, f"{label} {ref!r}: node has no inputs")
+                    assert isinstance(inputs, dict)
+                    self.assertIn(
+                        input_key,
+                        inputs,
+                        f"{label} {ref!r}: {node.get('class_type')} has no input {input_key!r}",
+                    )
+
     def test_qwen_image21_aio_sidecar_maps_constants_images_and_count(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         workflows_dir = project_root / "comfyui-api-workflows"
@@ -497,6 +558,46 @@ class WorkflowParameterMappingTests(unittest.TestCase):
         self.assertIs(normalize_parameter_value(spec, "0"), False)
         with self.assertRaises(ValueError):
             normalize_parameter_value(spec, "yes")
+
+    def test_non_finite_numbers_are_rejected(self) -> None:
+        # JSON accepts NaN/Infinity and both slip through min/max comparisons.
+        speed = WorkflowParameterDefinition(
+            name="speed",
+            type="float",
+            minimum=0.25,
+            maximum=4,
+            maps=(WorkflowParamTarget(ref="19.speed"),),
+        )
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    normalize_parameter_value(speed, bad)
+
+        steps = WorkflowParameterDefinition(name="steps", type="int", maps=(WorkflowParamTarget(ref="1.steps"),))
+        with self.assertRaises(ValueError):
+            normalize_parameter_value(steps, float("inf"))
+
+    def test_normalize_standard_params_reports_the_offending_name(self) -> None:
+        spec = WorkflowParameterSpec(
+            version=1,
+            kind="txt2audio",
+            parameters={
+                "speed": WorkflowParameterDefinition(
+                    name="speed",
+                    type="float",
+                    minimum=0.25,
+                    maximum=4,
+                    maps=(WorkflowParamTarget(ref="19.speed"),),
+                )
+            },
+            path=Path("voxcpm.params.json"),
+        )
+        # Unknown names pass through untouched; known ones are coerced.
+        params = normalize_standard_params(spec=spec, request_params={"speed": "1.5", "voice": "lyf"})
+        self.assertEqual(params, {"speed": 1.5, "voice": "lyf"})
+        with self.assertRaises(InvalidParameterError) as ctx:
+            normalize_standard_params(spec=spec, request_params={"speed": 5})
+        self.assertIn("speed", str(ctx.exception))
 
     def test_sidecar_mapping_loads_explicit_prompt_and_image_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .comfy_workflow import as_str, extract_prompt_and_extra, get_node_title, parse_node_input_ref, read_json
+from .errors import InvalidParameterError
 
 
 # OpenAI /v1/audio/speech passthrough params; sidecars can bind them to
@@ -178,9 +179,15 @@ def normalize_parameter_value(definition: WorkflowParameterDefinition, raw_value
                 raise ValueError(f"Parameter {definition.name!r} must be <= {definition.maximum}")
         return value
     elif ptype == "int":
-        value = int(raw_value)
+        try:
+            value = int(raw_value)
+        except OverflowError as exc:
+            raise ValueError(f"Parameter {definition.name!r} must be a finite integer") from exc
     elif ptype == "float":
         value = float(raw_value)
+        if not math.isfinite(value):
+            # JSON allows NaN/Infinity; both slip through min/max comparisons.
+            raise ValueError(f"Parameter {definition.name!r} must be a finite number")
     elif ptype == "bool":
         value = _parse_bool(raw_value)
     elif ptype == "image":
@@ -408,6 +415,31 @@ def _mapped_value(
     return parameter_value
 
 
+def normalize_standard_params(
+    *,
+    spec: WorkflowParameterSpec | None,
+    request_params: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Coerce and range-check sidecar-declared params; unknown names pass through.
+
+    Single implementation behind both the request-time check (`JobManager.create_job`)
+    and the run-time override resolution, so every entry point rejects the same
+    values with the same message instead of failing later inside a job.
+    """
+    params = dict(request_params or {})
+    if spec is None or not spec.parameters:
+        return params
+    for name, raw_value in list(params.items()):
+        definition = spec.parameters.get(name)
+        if definition is None:
+            continue
+        try:
+            params[name] = normalize_parameter_value(definition, raw_value)
+        except (TypeError, ValueError) as exc:
+            raise InvalidParameterError(f"Invalid '{name}': {exc}") from exc
+    return params
+
+
 def resolve_standard_overrides(
     *,
     workflow_obj: Any,
@@ -418,18 +450,13 @@ def resolve_standard_overrides(
         return []
 
     prompt, _extra_data = extract_prompt_and_extra(workflow_obj)
-    raw_request_params = dict(request_params or {})
     resolved_params: dict[str, Any] = {}
 
     for name, definition in spec.parameters.items():
         if definition.default is not None:
             resolved_params[name] = normalize_parameter_value(definition, definition.default)
 
-    for name, raw_value in raw_request_params.items():
-        definition = spec.parameters.get(name)
-        if definition is None:
-            continue
-        resolved_params[name] = normalize_parameter_value(definition, raw_value)
+    resolved_params.update(normalize_standard_params(spec=spec, request_params=request_params))
 
     overrides: list[tuple[str, str, Any]] = []
     for name in _ordered_parameter_names(spec.parameters.keys()):

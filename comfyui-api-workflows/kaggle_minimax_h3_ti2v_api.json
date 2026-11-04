@@ -2,7 +2,8 @@
   "92": {
     "inputs": {
       "filename_prefix": "video/MiniMax_H3",
-      "format": "auto",
+      "format": "mp4",
+      "format.codec": "auto",
       "codec": "auto",
       "video": [
         "132",
@@ -11,16 +12,20 @@
     },
     "class_type": "SaveVideo",
     "_meta": {
-      "title": "保存视频"
+      "title": "保存视频",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "114": {
     "inputs": {
-      "image": "5ec2a7a0-7e5e-4c5f-815e-457c532dcbf9.jpg"
+      "image": "example.png"
     },
     "class_type": "LoadImage",
     "_meta": {
-      "title": "加载图像"
+      "title": "加载图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "122": {
@@ -29,7 +34,9 @@
     },
     "class_type": "VAELoader",
     "_meta": {
-      "title": "加载VAE"
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "123": {
@@ -45,7 +52,9 @@
     },
     "class_type": "VAEDecodeAudio",
     "_meta": {
-      "title": "VAE解码（音频）"
+      "title": "VAE解码（音频）",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "124": {
@@ -55,13 +64,15 @@
         0
       ],
       "vae": [
-        "147",
+        "198",
         0
       ]
     },
     "class_type": "VAEDecode",
     "_meta": {
-      "title": "VAE解码"
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "125": {
@@ -70,7 +81,9 @@
     },
     "class_type": "KSamplerSelect",
     "_meta": {
-      "title": "K采样器选择"
+      "title": "K采样器选择",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "126": {
@@ -79,13 +92,15 @@
       "steps": 4,
       "denoise": 1,
       "model": [
-        "151",
+        "201",
         0
       ]
     },
     "class_type": "BasicScheduler",
     "_meta": {
-      "title": "基本调度器"
+      "title": "基本调度器",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "127": {
@@ -113,13 +128,15 @@
     },
     "class_type": "SamplerCustomAdvanced",
     "_meta": {
-      "title": "自定义采样器（高级）"
+      "title": "自定义采样器（高级）",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "128": {
     "inputs": {
       "model": [
-        "151",
+        "201",
         0
       ],
       "conditioning": [
@@ -129,22 +146,29 @@
     },
     "class_type": "BasicGuider",
     "_meta": {
-      "title": "基本引导器"
+      "title": "基本引导器",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "131": {
     "inputs": {
-      "noise_seed": 665958979647074
+      "noise_seed": 524972339033904
     },
     "class_type": "RandomNoise",
     "_meta": {
-      "title": "随机噪波"
+      "title": "随机噪波",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "132": {
     "inputs": {
       "fps": 24,
       "bit_depth": 8,
+      "color_space": "sRGB",
+      "chroma_subsampling": "auto",
+      "codec": "none",
       "images": [
         "124",
         0
@@ -156,7 +180,9 @@
     },
     "class_type": "CreateVideo",
     "_meta": {
-      "title": "创建视频"
+      "title": "创建视频",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "133": {
@@ -175,11 +201,11 @@
         1
       ],
       "clip": [
-        "159",
+        "197",
         0
       ],
       "vae": [
-        "147",
+        "198",
         0
       ],
       "first_frame": [
@@ -193,7 +219,9 @@
     },
     "class_type": "MiniMaxH3ImageToVideo",
     "_meta": {
-      "title": "MiniMax H3 Image to Video"
+      "title": "MiniMax H3 图像转视频",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "134": {
@@ -206,7 +234,9 @@
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
-      "title": "数学表达式"
+      "title": "数学表达式",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "135": {
@@ -215,66 +245,25 @@
     },
     "class_type": "PrimitiveFloat",
     "_meta": {
-      "title": "Float (duration)"
+      "title": "Float (duration)",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "139": {
     "inputs": {
-      "lora_name": "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
-      "strength_model": 0.7,
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "strength_model": 1,
       "model": [
-        "154",
+        "200",
         0
       ]
     },
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
-      "title": "LoRA加载器（仅模型）"
-    }
-  },
-  "147": {
-    "inputs": {
-      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors",
-      "device": "cuda:1"
-    },
-    "class_type": "VAELoaderMultiGPU",
-    "_meta": {
-      "title": "VAELoaderMultiGPU"
-    }
-  },
-  "151": {
-    "inputs": {
-      "sage_attention": "sageattn_qk_int8_pv_fp16_cuda",
-      "allow_compile": false,
-      "model": [
-        "139",
-        0
-      ]
-    },
-    "class_type": "PathchSageAttentionKJ",
-    "_meta": {
-      "title": "Patch Sage Attention KJ"
-    }
-  },
-  "154": {
-    "inputs": {
-      "unet_name": "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
-      "weight_dtype": "default"
-    },
-    "class_type": "UNETLoader",
-    "_meta": {
-      "title": "UNet加载器"
-    }
-  },
-  "159": {
-    "inputs": {
-      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-      "type": "minimax",
-      "device": "cuda:1"
-    },
-    "class_type": "CLIPLoaderMultiGPU",
-    "_meta": {
-      "title": "CLIPLoaderMultiGPU"
+      "title": "LoRA加载器（仅模型）",
+      "cnr_id": "comfy-core",
+      "ver": "0.31.0"
     }
   },
   "170": {
@@ -283,7 +272,9 @@
     },
     "class_type": "PrimitiveInt",
     "_meta": {
-      "title": "width"
+      "title": "width",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
     }
   },
   "171": {
@@ -292,7 +283,9 @@
     },
     "class_type": "PrimitiveInt",
     "_meta": {
-      "title": "height"
+      "title": "height",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
     }
   },
   "186": {
@@ -301,7 +294,9 @@
     },
     "class_type": "INTConstant",
     "_meta": {
-      "title": "inputImgCount"
+      "title": "inputImgCount",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "3f20054214fec9f9234fd3841ae6f1e4287948f6"
     }
   },
   "188": {
@@ -316,7 +311,9 @@
     },
     "class_type": "LayerUtility: BooleanOperatorV2",
     "_meta": {
-      "title": "图层工具：布尔运算符 V2"
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
     }
   },
   "191": {
@@ -325,7 +322,9 @@
     },
     "class_type": "LoadImage",
     "_meta": {
-      "title": "加载图像"
+      "title": "加载图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
     }
   },
   "192": {
@@ -340,7 +339,9 @@
     },
     "class_type": "LayerUtility: BooleanOperatorV2",
     "_meta": {
-      "title": "图层工具：布尔运算符 V2"
+      "title": "图层工具：布尔运算符 V2",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "64f976fec8492ea4930c0e30c32369573189b23d"
     }
   },
   "194": {
@@ -356,7 +357,9 @@
     },
     "class_type": "OverrideSwitch",
     "_meta": {
-      "title": "Override Switch"
+      "title": "Override Switch",
+      "aux_id": "opq0007/ComfyUI-OverrideSwitch",
+      "ver": "bc52182b6019e46d21498b079d4a649b782a43d7"
     }
   },
   "195": {
@@ -372,7 +375,61 @@
     },
     "class_type": "OverrideSwitch",
     "_meta": {
-      "title": "Override Switch"
+      "title": "Override Switch",
+      "aux_id": "opq0007/ComfyUI-OverrideSwitch",
+      "ver": "bc52182b6019e46d21498b079d4a649b782a43d7"
+    }
+  },
+  "197": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "198": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "200": {
+    "inputs": {
+      "unet_name": "minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.43.0"
+    }
+  },
+  "201": {
+    "inputs": {
+      "sage_attention": "sageattn_qk_int8_pv_fp16_cuda",
+      "allow_compile": false,
+      "model": [
+        "139",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ",
+      "cnr_id": "comfyui-kjnodes",
+      "ver": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"
     }
   }
 }

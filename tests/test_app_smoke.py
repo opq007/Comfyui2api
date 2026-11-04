@@ -1205,6 +1205,76 @@ class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["negative_prompt_node"], expected_node)
             self.assertIn(("52", "value", expected_count), kwargs["overrides"])
 
+    async def test_create_job_validates_standard_params_against_the_sidecar(self) -> None:
+        # create_job is the choke point every endpoint funnels through, so the
+        # check must hold here rather than only in /v1/audio/speech.
+        import comfyui2api.jobs as jobs_module
+        from comfyui2api.errors import InvalidParameterError
+        from comfyui2api.workflow_params import (
+            WorkflowParameterDefinition,
+            WorkflowParameterSpec,
+            WorkflowParamTarget,
+        )
+
+        from tests.helpers import fake_job_deps
+
+        deps = fake_job_deps()
+        spec = WorkflowParameterSpec(
+            version=1,
+            kind="txt2audio",
+            parameters={
+                "speed": WorkflowParameterDefinition(
+                    name="speed",
+                    type="float",
+                    minimum=0.25,
+                    maximum=4,
+                    maps=(WorkflowParamTarget(ref="19.speed"),),
+                ),
+                "size": WorkflowParameterDefinition(
+                    name="size",
+                    type="size",
+                    maps=(
+                        WorkflowParamTarget(ref="68.width", part="width"),
+                        WorkflowParamTarget(ref="68.height", part="height"),
+                    ),
+                ),
+            },
+            path=Path("voxcpm.params.json"),
+        )
+        manager = jobs_module.JobManager(
+            cfg=deps.cfg,
+            registry=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(parameter_spec=spec))),
+            pool=deps.pool,
+            backend=deps.backend,
+        )
+
+        with self.assertRaises(InvalidParameterError) as ctx:
+            await manager.create_job(
+                kind="txt2audio",
+                workflow="voxcpm.json",
+                prompt="hi",
+                standard_params={"speed": 9},
+            )
+        self.assertIn("speed", str(ctx.exception))
+
+        job = await manager.create_job(
+            kind="txt2audio",
+            workflow="voxcpm.json",
+            prompt="hi",
+            standard_params={"speed": "1.5", "voice": "lyf"},
+        )
+        self.assertEqual(job.standard_params, {"speed": 1.5, "voice": "lyf"})
+
+        # Non-audio kinds go through the same check, and the stored params are
+        # the canonical values that will be applied (size becomes a pair).
+        sized = await manager.create_job(
+            kind="txt2img",
+            workflow="voxcpm.json",
+            prompt="hi",
+            standard_params={"size": "1024x768"},
+        )
+        self.assertEqual(sized.standard_params["size"], (1024, 768))
+
     async def test_fail_job_records_error_and_sets_done(self) -> None:
         import comfyui2api.jobs as jobs_module
         from tests.helpers import fake_job_deps

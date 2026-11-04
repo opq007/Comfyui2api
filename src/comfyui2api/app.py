@@ -31,6 +31,7 @@ from .admin_limiter import AdminAuthLimiter
 from .admin_routes import create_admin_router
 from .backend_store import BackendStore
 from .config import Config, load_config
+from .errors import InvalidParameterError
 from .input_staging import stage_input_image
 from .instance_pool import InstancePool
 from .job_retention import run_job_retention_forever
@@ -454,6 +455,13 @@ def create_app() -> FastAPI:
         if isinstance(exc.detail, dict) and "error" in exc.detail:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         return await http_exception_handler(request, exc)
+
+    @app.exception_handler(InvalidParameterError)
+    async def _invalid_parameter_handler(request: Request, exc: InvalidParameterError) -> JSONResponse:
+        # create_job validates standard params for every endpoint; reuse the
+        # OpenAI error envelope so the shape matches the endpoints' own errors.
+        error = _openai_error(str(exc))
+        return JSONResponse(status_code=error.status_code, content=error.detail)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -1967,6 +1975,8 @@ def create_app() -> FastAPI:
         standard_params = _collect_standard_params(
             {key: body.get(key) for key in AUDIO_PARAMETER_ORDER if key in body}
         )
+        # Values are coerced and range-checked against the workflow's sidecar
+        # inside create_job, which is the single choke point for every endpoint.
         job = await jobs.create_job(
             kind="txt2audio",
             workflow=wf.name,
