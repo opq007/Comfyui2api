@@ -612,18 +612,15 @@ class JobManager:
         (run_dir / "history.json").write_text(json_dumps(history) + "\n", encoding="utf-8")
 
         outputs: list[JobOutput] = []
+        # iter_file_outputs yields only the entries ComfyUI's /view can serve,
+        # with filename/subfolder/type already normalized.
         for node_id, output_key, fileinfo in iter_file_outputs(history):
-            filename = fileinfo.get("filename")
-            if not isinstance(filename, str) or not filename:
-                continue
-            subfolder = fileinfo.get("subfolder", "")
-            if not isinstance(subfolder, str):
-                subfolder = ""
-            folder_type = fileinfo.get("type", "output")
-            if not isinstance(folder_type, str):
-                folder_type = "output"
-
-            blob = await client.view_bytes(filename=filename, subfolder=subfolder, folder_type=folder_type)
+            filename = fileinfo["filename"]
+            blob = await client.view_bytes(
+                filename=filename,
+                subfolder=fileinfo["subfolder"],
+                folder_type=fileinfo["type"],
+            )
             safe_node = sanitize_filename_part(node_id, max_len=60)
             safe_name = sanitize_filename_part(Path(filename).name, max_len=120)
             out_name = f"{safe_node}__{safe_name}"

@@ -489,7 +489,22 @@ def prepare_prompt(
     return prompt, extra_data, combined_overrides, prompt_trace
 
 
+# ComfyUI's `/view` serves a file only when its `type` names a folder ComfyUI
+# knows, and answers 400 "Invalid type" otherwise. Save nodes write to `output`
+# and preview nodes to `temp`; any other type is a node pack's own bookkeeping.
+# WAS Node Suite, for one, republishes the panel previews of its audio/video
+# nodes as hash-named files with `type: "was_compare"`, kept in its own compare
+# folder and served by its own route — requesting one through `/view` fails the
+# whole job even though the workflow's real output was saved.
+VIEWABLE_FOLDER_TYPES = frozenset({"output", "temp"})
+
+
 def iter_file_outputs(history_entry: Dict[str, Any]) -> Iterable[Tuple[str, str, Dict[str, Any]]]:
+    """Yield the history entries that ComfyUI's `/view` can actually serve.
+
+    Each file info is yielded as a copy with `filename`, `subfolder` and `type`
+    normalized to strings, so callers can fetch it without re-validating.
+    """
     outputs = history_entry.get("outputs")
     if not isinstance(outputs, dict):
         return
@@ -499,10 +514,22 @@ def iter_file_outputs(history_entry: Dict[str, Any]) -> Iterable[Tuple[str, str,
         for output_key, items in out.items():
             if not isinstance(items, list) or not items:
                 continue
-            if not all(isinstance(x, dict) and "filename" in x for x in items):
-                continue
             for fileinfo in items:
-                yield node_id, str(output_key), fileinfo
+                if not isinstance(fileinfo, dict):
+                    continue
+                filename = fileinfo.get("filename")
+                if not isinstance(filename, str) or not filename:
+                    continue
+                folder_type = fileinfo.get("type", "output")
+                if not isinstance(folder_type, str) or folder_type not in VIEWABLE_FOLDER_TYPES:
+                    continue
+                subfolder = fileinfo.get("subfolder")
+                yield node_id, str(output_key), {
+                    **fileinfo,
+                    "filename": filename,
+                    "subfolder": subfolder if isinstance(subfolder, str) else "",
+                    "type": folder_type,
+                }
 
 
 @dataclass(frozen=True)

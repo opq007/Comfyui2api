@@ -295,6 +295,59 @@ class AudioSpeechEndpointTests(_SpeechAppTestCase):
         self.assertEqual(response.headers["content-type"].split(";")[0], "audio/wav")
         self.assertEqual(response.content, WAV_BYTES)
 
+    def test_speech_skips_node_pack_panel_entries_it_cannot_fetch(self) -> None:
+        # WAS Node Suite adds a compare-panel entry to the history of its audio
+        # nodes (hash-named .wav, type="was_compare", served by its own route),
+        # and ComfyUI's /view answers 400 "Invalid type" for it. Downloading
+        # that entry used to fail the job before the saved mp3 was returned.
+        import asyncio
+
+        from tests.helpers import mark_instances_healthy_sync
+
+        mark_instances_healthy_sync(self.app)
+        mp3_bytes = b"ID3-fake-mp3-bytes"
+        history = {
+            "prompt_id": "prompt-tts-3",
+            "status": {"status_str": "success", "completed": True},
+            "outputs": {
+                "19": {
+                    "audio_sides": [
+                        {
+                            "filename": "7001648be39185c955473b7fcb6efda8.wav",
+                            "subfolder": "",
+                            "type": "was_compare",
+                        }
+                    ]
+                },
+                "17": {
+                    "audio": [
+                        {"filename": "ComfyUI_00001_.mp3", "subfolder": "audio", "type": "output"}
+                    ]
+                },
+            },
+        }
+        fake_client = _fake_speech_client(prompt_id="prompt-tts-3")
+        fake_client.get_history_entry = AsyncMock(return_value=history)
+        fake_client.wait_for_history_complete = AsyncMock(return_value=history)
+        fake_client.view_bytes = AsyncMock(return_value=mp3_bytes)
+        with patch.object(self.app.state.pool, "client_for", AsyncMock(return_value=fake_client)):
+            response = self.client.post(
+                "/v1/audio/speech",
+                headers={"Authorization": "Bearer api-token"},
+                json={"model": "tts-model", "input": "panel entry"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"].split(";")[0], "audio/mpeg")
+        self.assertEqual(response.content, mp3_bytes)
+        # Only the saved file was fetched, from its own folder and subfolder.
+        fake_client.view_bytes.assert_awaited_once_with(
+            filename="ComfyUI_00001_.mp3", subfolder="audio", folder_type="output"
+        )
+        job = asyncio.run(self.app.state.jobs.list_jobs(limit=10))[0]
+        self.assertEqual([output.filename for output in job.outputs], ["17__ComfyUI_00001_.mp3"])
+        self.assertEqual(job.outputs[0].media_type, "audio/mpeg")
+
     def test_speech_sidecar_binds_voice_and_speed_to_node_inputs(self) -> None:
         # Acceptance #3 evidence: a sidecar-declared `voice`/`speed` parameter
         # must be rewritten into the TTS node inputs of the queued prompt.

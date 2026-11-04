@@ -10,7 +10,12 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from comfyui2api.comfy_workflow import normalize_prompt_enum_inputs, prepare_prompt, prune_invalid_orphan_output_nodes
+from comfyui2api.comfy_workflow import (
+    iter_file_outputs,
+    normalize_prompt_enum_inputs,
+    prepare_prompt,
+    prune_invalid_orphan_output_nodes,
+)
 
 
 class ComfyWorkflowSanitizationTests(unittest.TestCase):
@@ -345,6 +350,73 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
                     r"LTX\ltx-2.3-22b-distilled-lora-384.safetensors",
                     "ltx-2.3-22b-distilled-lora-384.safetensors",
                 ),
+            ],
+        )
+
+
+class HistoryFileOutputTests(unittest.TestCase):
+    """Only entries ComfyUI's /view can serve are job outputs."""
+
+    def test_keeps_saved_output_and_drops_node_pack_panel_entries(self) -> None:
+        # WAS Node Suite republishes its compare-panel previews with
+        # type="was_compare" (hash-named .wav, served by its own route), and
+        # /view answers 400 "Invalid type" for them — one such entry used to
+        # fail the whole TTS job even though the real mp3 was saved.
+        history = {
+            "outputs": {
+                "17": {
+                    "audio": [
+                        {"filename": "ComfyUI_00001_.mp3", "subfolder": "audio", "type": "output"}
+                    ]
+                },
+                "19": {
+                    "audio_sides": [
+                        {
+                            "filename": "7001648be39185c955473b7fcb6efda8.wav",
+                            "subfolder": "",
+                            "type": "was_compare",
+                        }
+                    ]
+                },
+            }
+        }
+        self.assertEqual(
+            list(iter_file_outputs(history)),
+            [
+                (
+                    "17",
+                    "audio",
+                    {"filename": "ComfyUI_00001_.mp3", "subfolder": "audio", "type": "output"},
+                )
+            ],
+        )
+
+    def test_normalizes_missing_or_odd_file_info(self) -> None:
+        history = {
+            "outputs": {
+                "1": {
+                    "images": [
+                        {"filename": "temp.png", "subfolder": None},
+                        {"filename": "preview.png", "subfolder": "sub", "type": "temp"},
+                        {"filename": "", "type": "output"},
+                        {"filename": 3, "type": "output"},
+                        {"subfolder": "", "type": "output"},
+                    ],
+                    "empty": [],
+                    "gifs": [{"filename": "a.gif", "type": "output"}],
+                },
+                "2": {"images": [{"filename": "b.png", "type": "output"}]},
+                "3": "not-a-node",
+            }
+        }
+        self.assertEqual(
+            [(node_id, key, info["filename"], info["subfolder"], info["type"]) for node_id, key, info in iter_file_outputs(history)],
+            [
+                # A missing type is a save node's output; a non-str subfolder is the root.
+                ("1", "images", "temp.png", "", "output"),
+                ("1", "images", "preview.png", "sub", "temp"),
+                ("1", "gifs", "a.gif", "", "output"),
+                ("2", "images", "b.png", "", "output"),
             ],
         )
 
