@@ -355,7 +355,7 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
 
 
 class HistoryFileOutputTests(unittest.TestCase):
-    """Only entries ComfyUI's /view can serve are job outputs."""
+    """Only files a save node wrote to ComfyUI's output folder are job outputs."""
 
     def test_keeps_saved_output_and_drops_node_pack_panel_entries(self) -> None:
         # WAS Node Suite republishes its compare-panel previews with
@@ -396,7 +396,7 @@ class HistoryFileOutputTests(unittest.TestCase):
             "outputs": {
                 "1": {
                     "images": [
-                        {"filename": "temp.png", "subfolder": None},
+                        {"filename": "no_type.png", "subfolder": None},
                         {"filename": "preview.png", "subfolder": "sub", "type": "temp"},
                         {"filename": "", "type": "output"},
                         {"filename": 3, "type": "output"},
@@ -410,11 +410,15 @@ class HistoryFileOutputTests(unittest.TestCase):
             }
         }
         self.assertEqual(
-            [(node_id, key, info["filename"], info["subfolder"], info["type"]) for node_id, key, info in iter_file_outputs(history)],
             [
-                # A missing type is a save node's output; a non-str subfolder is the root.
-                ("1", "images", "temp.png", "", "output"),
-                ("1", "images", "preview.png", "sub", "temp"),
+                (node_id, key, info["filename"], info["subfolder"], info["type"])
+                for node_id, key, info in iter_file_outputs(history)
+            ],
+            [
+                # A missing type is a save node's output and a non-str subfolder
+                # is the root; a preview (temp) entry and malformed ones are not
+                # job artifacts.
+                ("1", "images", "no_type.png", "", "output"),
                 ("1", "gifs", "a.gif", "", "output"),
                 ("2", "images", "b.png", "", "output"),
             ],

@@ -612,8 +612,8 @@ class JobManager:
         (run_dir / "history.json").write_text(json_dumps(history) + "\n", encoding="utf-8")
 
         outputs: list[JobOutput] = []
-        # iter_file_outputs yields only the entries ComfyUI's /view can serve,
-        # with filename/subfolder/type already normalized.
+        # iter_file_outputs yields only the entries a save node wrote to the
+        # output folder, with filename/subfolder/type already normalized.
         for node_id, output_key, fileinfo in iter_file_outputs(history):
             filename = fileinfo["filename"]
             blob = await client.view_bytes(

@@ -489,18 +489,17 @@ def prepare_prompt(
     return prompt, extra_data, combined_overrides, prompt_trace
 
 
-# ComfyUI's `/view` serves a file only when its `type` names a folder ComfyUI
-# knows, and answers 400 "Invalid type" otherwise. Save nodes write to `output`
-# and preview nodes to `temp`; any other type is a node pack's own bookkeeping.
-# WAS Node Suite, for one, republishes the panel previews of its audio/video
-# nodes as hash-named files with `type: "was_compare"`, kept in its own compare
-# folder and served by its own route — requesting one through `/view` fails the
-# whole job even though the workflow's real output was saved.
-VIEWABLE_FOLDER_TYPES = frozenset({"output", "temp"})
+# Job artifacts are the files a save node wrote to ComfyUI's `output` folder —
+# the one `/view` serves them from. Preview nodes write to `temp` (pruned, not a
+# deliverable), and any other type is a node pack's own bookkeeping: WAS Node
+# Suite, for one, republishes the panel previews of its audio/video nodes as
+# hash-named files with `type: "was_compare"`, kept outside ComfyUI's folders and
+# served by its own route, so requesting one through `/view` fails the whole job.
+OUTPUT_FOLDER_TYPE = "output"
 
 
 def iter_file_outputs(history_entry: Dict[str, Any]) -> Iterable[Tuple[str, str, Dict[str, Any]]]:
-    """Yield the history entries that ComfyUI's `/view` can actually serve.
+    """Yield the history entries a save node wrote to ComfyUI's `output` folder.
 
     Each file info is yielded as a copy with `filename`, `subfolder` and `type`
     normalized to strings, so callers can fetch it without re-validating.
@@ -520,8 +519,8 @@ def iter_file_outputs(history_entry: Dict[str, Any]) -> Iterable[Tuple[str, str,
                 filename = fileinfo.get("filename")
                 if not isinstance(filename, str) or not filename:
                     continue
-                folder_type = fileinfo.get("type", "output")
-                if not isinstance(folder_type, str) or folder_type not in VIEWABLE_FOLDER_TYPES:
+                folder_type = fileinfo.get("type", OUTPUT_FOLDER_TYPE)
+                if folder_type != OUTPUT_FOLDER_TYPE:
                     continue
                 subfolder = fileinfo.get("subfolder")
                 yield node_id, str(output_key), {
