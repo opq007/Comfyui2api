@@ -278,17 +278,21 @@ def _fake_job() -> SimpleNamespace:
     )
 
 
+def _model_record(*instance_slugs: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        slug="model-a",
+        enabled=True,
+        workflow_name="w.json",
+        routing_policy="round_robin",
+        instance_slugs=tuple(instance_slugs),
+    )
+
+
 class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_scan_once_kicks_probes_when_blocked(self) -> None:
         from comfyui2api.job_scheduler import JobScheduler
 
-        record = SimpleNamespace(
-            slug="model-a",
-            enabled=True,
-            workflow_name="w.json",
-            routing_policy="round_robin",
-            instance_slugs=("gpu-a", "gpu-b"),
-        )
+        record = _model_record("gpu-a", "gpu-b")
         manager = _scheduler_manager(record=record, job=_fake_job())
         manager.pool.ready_slugs = AsyncMock(return_value=[])
         scheduler = JobScheduler(manager)
@@ -305,13 +309,7 @@ class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
         # inside the scan).
         from comfyui2api.job_scheduler import JobScheduler
 
-        record = SimpleNamespace(
-            slug="model-a",
-            enabled=True,
-            workflow_name="w.json",
-            routing_policy="round_robin",
-            instance_slugs=("gpu-a",),
-        )
+        record = _model_record("gpu-a")
         manager = _scheduler_manager(record=record, job=_fake_job())
         manager.get_job = AsyncMock(side_effect=[RuntimeError("db locked"), None])
         scheduler = JobScheduler(manager)
@@ -331,13 +329,7 @@ class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
         # common failure (backend just went down).
         from comfyui2api.job_scheduler import JobScheduler
 
-        record = SimpleNamespace(
-            slug="model-a",
-            enabled=True,
-            workflow_name="w.json",
-            routing_policy="round_robin",
-            instance_slugs=("gpu-a", "gpu-b"),
-        )
+        record = _model_record("gpu-a", "gpu-b")
         manager = _scheduler_manager(record=record, job=_fake_job())
         manager.pool.choose_and_reserve = AsyncMock(side_effect=["gpu-a", "gpu-b"])
         manager.pool.release = AsyncMock()
@@ -352,13 +344,7 @@ class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
         from comfyui2api.comfy_client import ComfyApiError
         from comfyui2api.job_scheduler import JobScheduler
 
-        record = SimpleNamespace(
-            slug="model-a",
-            enabled=True,
-            workflow_name="w.json",
-            routing_policy="round_robin",
-            instance_slugs=("gpu-a",),
-        )
+        record = _model_record("gpu-a")
         job = _fake_job()
         job.prompt_id = "prompt-1"
         manager = _scheduler_manager(record=record, job=job)
@@ -369,6 +355,58 @@ class JobSchedulerTests(unittest.IsolatedAsyncioTestCase):
         await scheduler._dispatch("job-1")
         client.delete_queue_entries.assert_awaited_once_with(["prompt-1"])
         manager.fail_job.assert_awaited_once()
+
+    async def test_dispatch_reroutes_when_instance_has_no_live_client(self) -> None:
+        # Regression: a `client_for` failure (instance deleted between reserve and
+        # dispatch) used to leave in_flight incremented for good, which makes the
+        # instance unschedulable forever while the dashboard still calls it
+        # healthy. It is also a submit-time failure, so spec §11.5 retries once.
+        from comfyui2api.job_scheduler import JobScheduler
+
+        manager = _scheduler_manager(record=_model_record("gpu-a", "gpu-b"), job=_fake_job())
+        manager.pool.client_for = AsyncMock(side_effect=[LookupError("Instance `gpu-a` has no live client."), object()])
+        scheduler = JobScheduler(manager)
+        await scheduler._dispatch("job-1")
+        manager.fail_job.assert_not_awaited()
+        manager._run_job.assert_awaited_once()
+        self.assertEqual(manager.pool.release.await_count, 2)
+        retry = manager.pool.choose_and_reserve.await_args_list[1].kwargs
+        self.assertEqual(retry["exclude"], {"gpu-a"})
+
+    async def test_dispatch_fails_after_the_reroute_is_used_up(self) -> None:
+        from comfyui2api.job_scheduler import JobScheduler
+
+        manager = _scheduler_manager(record=_model_record("gpu-a", "gpu-b"), job=_fake_job())
+        manager.pool.client_for = AsyncMock(side_effect=LookupError("no live client"))
+        scheduler = JobScheduler(manager)
+        await scheduler._dispatch("job-1")
+        manager._run_job.assert_not_awaited()
+        manager.fail_job.assert_awaited_once()
+        self.assertIn("LookupError", manager.fail_job.await_args.args[1])
+        self.assertEqual(manager.pool.release.await_count, 2)  # both attempts freed their slot
+
+    async def test_failed_client_lookup_leaves_the_real_pool_schedulable(self) -> None:
+        # The leak is about the real reservation, so assert on a real pool: after
+        # a dispatch whose client lookup blows up, the slot must be back and the
+        # instance must be offered to the next job again.
+        import comfyui2api.instance_pool as pool_module
+        from comfyui2api.job_scheduler import JobScheduler
+
+        record = _instance_record("gpu-a", max_in_flight=1)
+        pool = pool_module.InstancePool(cfg=_pool_cfg(), store=_fake_store(record))
+        await pool.sync_instance(record, probe_now=False)
+        async with pool._lock:
+            pool._runtimes["gpu-a"].health = pool_module.HEALTH_HEALTHY
+        manager = _scheduler_manager(record=_model_record("gpu-a"), job=_fake_job())
+        manager.pool = pool
+        manager.pool.client_for = AsyncMock(side_effect=LookupError("no live client"))
+        scheduler = JobScheduler(manager)
+        await scheduler._dispatch("job-1")
+        manager.fail_job.assert_awaited_once()
+        async with pool._lock:
+            self.assertEqual(pool._runtimes["gpu-a"].in_flight, 0)
+        self.assertEqual(await pool.ready_slugs(["gpu-a"]), ["gpu-a"])
+        await pool.aclose()
 
 
 class RunJobTimeoutTests(unittest.IsolatedAsyncioTestCase):

@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlencode
 
 from .backend_store import BackendStore
@@ -29,6 +29,122 @@ from .workflow_registry import WorkflowDefinition, WorkflowRegistry
 
 
 logger = logging.getLogger(__name__)
+
+
+# Pull-based completion watchdog. The ComfyUI WebSocket is the fast path, but it
+# is a fire-and-forget push channel: ComfyUI delivers `executing`/progress only
+# to the socket registered under the prompt's client_id and silently drops the
+# message when nobody is attached yet (the monitor connects *after* `/prompt`
+# returns), a backend restart removes the prompt without a terminal event, and
+# an operator emptying the queue does the same. Any of those leaves the gateway
+# waiting on a socket that stays open and silent: the job sits in "queued" at 0%
+# while its instance slot stays reserved until TIMEOUT_S (one hour by default),
+# which reads exactly as "the task is stuck in the queue and never runs" and
+# blocks that instance for every later job too.
+#
+# So the wait is sliced: once a slice passes without any push message, the slice
+# ends with a `/history` probe (a dict lookup on the ComfyUI side). 5s is 10x
+# lighter than the 0.5s poller this replaced, and a job whose WS is streaming
+# pays nothing at all — silence after the job ends is what triggers the probe.
+HISTORY_WATCH_INTERVAL_S = 5.0
+# How long the push channel may stay quiet before the watchdog also probes
+# `/queue`. Long enough that a normal sampler step (which streams WS events)
+# never triggers it; the probe is what distinguishes "still pending on ComfyUI"
+# from "the prompt is gone", and it is also how a lost `executing` event gets
+# noticed so the task is not 0%/"queued" for its whole run.
+WS_SILENCE_GRACE_S = 30.0
+# A prompt that is neither executing nor pending on ComfyUI and has no history
+# entry will never finish. Requiring several consecutive observations keeps a
+# prompt that is merely moving from `queue_running` into history from being
+# misread as lost.
+PROMPT_MISSING_CHECKS = 3
+
+# Where `/queue` says a prompt is. The values deliberately reuse the job status
+# words ("running"/"pending"); the *names* are what keep the two domains apart —
+# a queue state is not a job status and must never be assigned to one.
+QueuePromptState = Literal["running", "pending", "missing", "unknown"]
+QUEUE_STATE_RUNNING: QueuePromptState = "running"
+QUEUE_STATE_PENDING: QueuePromptState = "pending"
+QUEUE_STATE_MISSING: QueuePromptState = "missing"
+# The backend could not answer, or answered in a shape we do not recognise. Never
+# a reason to fail a job.
+QUEUE_STATE_UNKNOWN: QueuePromptState = "unknown"
+
+# ComfyUI events that belong to a prompt's execution. Everything else on the
+# socket (`status`, node-pack telemetry) is broadcast to every client and says
+# nothing about *this* job, so it must not count as activity.
+PROMPT_EVENT_TYPES = frozenset(
+    {
+        "executing",
+        "progress",
+        "execution_start",
+        "execution_cached",
+        "execution_success",
+        "execution_error",
+        "executed",
+    }
+)
+
+
+def _completion_timeout_error(timeout_s: int, prompt_id: str) -> TimeoutError:
+    return TimeoutError(f"Timed out waiting for ComfyUI to finish after {timeout_s}s (prompt_id={prompt_id}).")
+
+
+def _remaining_budget(timeout_s: int, deadline: float | None, now: float, prompt_id: str) -> int:
+    """How much of TIMEOUT_S is still available, rounded up.
+
+    Raises when nothing is left so a hand-over can never restart the clock.
+    """
+    if deadline is None:
+        return timeout_s
+    left_s = deadline - now
+    if left_s <= 0:
+        raise _completion_timeout_error(timeout_s, prompt_id)
+    return max(1, int(left_s) + 1)
+
+
+def _is_own_prompt_event(*, mtype: Any, pid: Any, prompt_id: str) -> bool:
+    """Does this socket message belong to the job's own prompt?
+
+    Only these may reset the watchdog's silence clock. `status` (and node-pack
+    telemetry) is broadcast to every socket whenever the queue changes, so
+    counting it would keep a stalled job looking alive as long as any other
+    client touches the instance — the exact case the watchdog exists for.
+    """
+    if mtype not in PROMPT_EVENT_TYPES:
+        return False
+    if not pid:
+        # Older ComfyUI omits prompt_id on job events; an unowned job event is
+        # the best signal available there.
+        return True
+    return str(pid) == prompt_id
+
+
+def _completed_history(entry: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    """The entry when ComfyUI reports it final and successful, else None.
+
+    A failed entry raises: that is a real ComfyUI outcome, not something to keep
+    waiting on.
+    """
+    if not entry:
+        return None
+    error = history_entry_error(entry)
+    if error:
+        raise ComfyApiError(error)
+    return entry if history_entry_is_complete(entry) else None
+
+
+@dataclass
+class _WsActivity:
+    """Last time the monitor saw a message about this job's own prompt.
+
+    Stamped with the event loop's clock (`loop.time()`) — the same clock the
+    deadline uses, so the silence can be compared against it directly. Under
+    uvloop `time.monotonic()` has a different origin and the subtraction would
+    be meaningless.
+    """
+
+    last_event_at: float
 
 
 def _signed_media_url(cfg: Config, url: str) -> str:
@@ -562,52 +678,37 @@ class JobManager:
         )
         await self._update(job_id, run_dir=str(run_dir))
 
-        # The WebSocket monitor is the live, push-based progress source. Do NOT
-        # run a redundant `/history` poller concurrently — that hammered ComfyUI
-        # every `poll_interval_s` (default 0.5s) for the whole duration of every
-        # job even while WS events were flowing. Only fall back to history
-        # polling if the WS monitor ends without a successful completion.
+        # The WebSocket monitor is the live, push-based progress source. It is
+        # not the only completion source, though: `_await_completion` races it
+        # against a pull-based watchdog, so a lost push costs one cheap
+        # `/history` probe instead of a job parked in "queued" (holding its
+        # instance slot) until TIMEOUT_S.
+        activity = _WsActivity(last_event_at=asyncio.get_running_loop().time())
         ws_task = asyncio.create_task(
-            self._monitor_ws(job_id=job_id, client=client, client_id=client_id, prompt_id=qp.prompt_id),
+            self._monitor_ws(
+                job_id=job_id,
+                client=client,
+                client_id=client_id,
+                prompt_id=qp.prompt_id,
+                activity=activity,
+            ),
             name=f"job-ws-{job_id[:8]}",
         )
-        history: Dict[str, Any]
-        ws_error: BaseException | None = None
         try:
-            if self.cfg.timeout_s > 0:
-                # Bound the push-based monitor too: a ComfyUI process that is
-                # alive at the TCP/WS layer but never executes or emits events
-                # would otherwise park this job (and its instance slot) in
-                # "queued" forever.
-                await asyncio.wait_for(ws_task, timeout=float(self.cfg.timeout_s))
-            else:
-                await ws_task
-        except asyncio.CancelledError:
-            # Cancellation (shutdown / scheduler stop) must propagate instead
-            # of falling into the history-poll fallback, which used to stall
-            # shutdown for up to TIMEOUT_S and leak the ws task.
-            ws_task.cancel()
-            raise
-        except BaseException as exc:  # noqa: BLE001 - propagate after fallback
-            ws_error = exc
-        if ws_error is not None:
-            logger.warning(
-                "job websocket monitor failed, continuing with history polling: job_id=%s client_id=%s prompt_id=%s exc=%r",
-                job_id,
-                client_id,
-                qp.prompt_id,
-                ws_error,
-            )
-            history = await client.wait_for_history_complete(
-                prompt_id=qp.prompt_id, timeout_s=self.cfg.timeout_s, poll_interval_s=self.cfg.poll_interval_s
-            )
-        else:
-            history = await self._history_after_ws(
+            history = await self._await_completion(
+                job_id=job_id,
                 client=client,
                 prompt_id=qp.prompt_id,
-                timeout_s=self.cfg.timeout_s,
-                poll_interval_s=self.cfg.poll_interval_s,
+                ws_task=ws_task,
+                activity=activity,
             )
+        finally:
+            # Cancellation (shutdown / scheduler stop) must propagate without
+            # stalling in a history poll, and a finished wait must never leave
+            # the monitor connected until its ping timeout.
+            if not ws_task.done():
+                ws_task.cancel()
+            await asyncio.gather(ws_task, return_exceptions=True)
 
         (run_dir / "history.json").write_text(json_dumps(history) + "\n", encoding="utf-8")
 
@@ -657,32 +758,192 @@ class JobManager:
         if job:
             job.done.set()
 
-    async def _history_after_ws(
+    async def _await_completion(
         self,
         *,
+        job_id: str,
         client: ComfyUIClient,
         prompt_id: str,
+        ws_task: asyncio.Task[None],
+        activity: _WsActivity,
+    ) -> Dict[str, Any]:
+        """Wait for the job's ComfyUI prompt to finish.
+
+        The WebSocket monitor is awaited in bounded slices so a pull-based
+        watchdog can run alongside it. A slice that saw no push message ends
+        with one `/history` probe (a dict lookup on ComfyUI's side), because
+        silence is not proof the prompt is alive: a prompt that finished while
+        the push channel was quiet is still collected here instead of leaving
+        the job — and its instance slot — in "queued" for the whole TIMEOUT_S.
+        While WS events keep flowing the probe never runs, so the "no redundant
+        poller" cost model that removed the old 0.5s poller still holds. A job
+        whose socket stays silent for its whole run pays at most one `/history`
+        and one `/queue` per `HISTORY_WATCH_INTERVAL_S`.
+
+        The `/queue` probe behind WS_SILENCE_GRACE_S distinguishes a prompt still
+        waiting its turn from one ComfyUI no longer knows about (backend
+        restarted, queue cleared). It also repairs a lost `executing` event by
+        reporting the task as running instead of 0%/"queued".
+
+        Only the execution window is bounded here. The queue wait is bounded by
+        the scheduler from `created_at` (spec item 12), and these are two
+        separate budgets by design: a task that waited a long time for a free
+        slot must not be killed the moment it starts running.
+        """
+        loop = asyncio.get_running_loop()
+        timeout_s = self.cfg.timeout_s
+        poll_interval_s = float(self.cfg.poll_interval_s)
+        deadline = None if timeout_s <= 0 else loop.time() + float(timeout_s)
+        watch_interval = max(HISTORY_WATCH_INTERVAL_S, poll_interval_s)
+        silence_grace = WS_SILENCE_GRACE_S
+        if timeout_s > 0:
+            # The watchdog has to be able to act before the deadline; a short
+            # TIMEOUT_S must not turn the grace period into "never probes".
+            silence_grace = min(silence_grace, max(watch_interval, float(timeout_s) / 10.0))
+        missing_checks = 0
+        while True:
+            remaining = watch_interval if deadline is None else min(watch_interval, deadline - loop.time())
+            if remaining <= 0:
+                raise _completion_timeout_error(timeout_s, prompt_id)
+            done, _pending = await asyncio.wait({ws_task}, timeout=remaining)
+            if ws_task in done:
+                return await self._history_after_ws_end(
+                    job_id=job_id,
+                    client=client,
+                    prompt_id=prompt_id,
+                    ws_task=ws_task,
+                    # Only the budget actually left: a backend that stalls twice
+                    # must not cost 2x TIMEOUT_S.
+                    timeout_s=_remaining_budget(timeout_s, deadline, loop.time(), prompt_id),
+                    poll_interval_s=poll_interval_s,
+                )
+            silent_for = loop.time() - activity.last_event_at
+            if silent_for < watch_interval:
+                # Events are still arriving; the push channel is doing its job.
+                missing_checks = 0
+                continue
+            history, missing_checks = await self._watchdog_probe(
+                job_id=job_id,
+                client=client,
+                prompt_id=prompt_id,
+                missing_checks=missing_checks,
+                check_queue=silent_for >= silence_grace,
+            )
+            if history is not None:
+                # The prompt finished while the push channel was silent: this is
+                # the write-back the job would otherwise never get.
+                return history
+
+    async def _watchdog_probe(
+        self,
+        *,
+        job_id: str,
+        client: ComfyUIClient,
+        prompt_id: str,
+        missing_checks: int,
+        check_queue: bool,
+    ) -> tuple[Dict[str, Any] | None, int]:
+        """One pull probe while the push channel is quiet.
+
+        Returns (finished history, updated missing-prompt streak); a non-None
+        history ends the wait. Failing a job for a vanished prompt requires both
+        probes to be readable, so an unreadable `/history` is never evidence.
+        """
+        history_ok, entry = await _poll_history_entry(client, prompt_id)
+        finished = _completed_history(entry)
+        if finished is not None:
+            return finished, missing_checks
+        if not check_queue:
+            return None, 0
+        state = await _queue_prompt_state(client, prompt_id)
+        if state == QUEUE_STATE_RUNNING:
+            await self._report_running_from_watchdog(job_id)
+            return None, 0
+        if state != QUEUE_STATE_MISSING or not history_ok:
+            # Still pending on ComfyUI, an unusable probe result, or a `/queue`
+            # miss we cannot corroborate because history is unreadable: keep
+            # waiting. Failing on partial evidence would throw away the outputs
+            # of a prompt that actually finished.
+            return None, 0
+        missing_checks += 1
+        if missing_checks >= PROMPT_MISSING_CHECKS:
+            # ComfyUI has neither queued nor run this prompt: waiting out
+            # TIMEOUT_S would only hold the instance slot, so fail with the real
+            # reason. The scheduler sees `prompt_id` and fails the job without
+            # rerouting, per spec §11.6 (never re-spend the GPU on a prompt that
+            # may still be alive somewhere).
+            raise ComfyApiError(
+                f"ComfyUI no longer has this prompt queued or in its history (prompt_id={prompt_id})."
+            )
+        return None, missing_checks
+
+    async def _report_running_from_watchdog(self, job_id: str) -> None:
+        """Mark a job running when its `executing` event was lost.
+
+        The node id lives in the event we never received, so it is reported as
+        unknown rather than invented.
+        """
+        job = await self.get_job(job_id)
+        if job is None or job.status == "running":
+            return
+        await self._update(job_id, status="running", persist=True)
+        await self._publish(job_id, {"type": "job_running", "data": {"node": None}})
+
+    async def _history_after_ws_end(
+        self,
+        *,
+        job_id: str,
+        client: ComfyUIClient,
+        prompt_id: str,
+        ws_task: asyncio.Task[None],
         timeout_s: int,
         poll_interval_s: float,
     ) -> Dict[str, Any]:
+        """Collect the history after the monitor finished on its own."""
+        ws_error: BaseException | None = None
+        if not ws_task.cancelled():
+            ws_error = ws_task.exception()
+        if ws_error is not None:
+            logger.warning(
+                "job websocket monitor failed, continuing with history polling: job_id=%s prompt_id=%s exc=%r",
+                job_id,
+                prompt_id,
+                ws_error,
+            )
+            return await client.wait_for_history_complete(
+                prompt_id=prompt_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+            )
         entry = await client.get_history_entry(prompt_id)
-        if entry:
-            error = history_entry_error(entry)
-            if error:
-                raise ComfyApiError(error)
-            if history_entry_is_complete(entry):
-                return entry
+        finished = _completed_history(entry)
+        if finished is not None:
+            return finished
         # WS reported completion but history is not final yet (or the WS ended
         # without a terminal signal). Fall back to bounded history polling.
         return await client.wait_for_history_complete(
             prompt_id=prompt_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
         )
 
-    async def _monitor_ws(self, *, job_id: str, client: ComfyUIClient, client_id: str, prompt_id: str) -> None:
+    async def _monitor_ws(
+        self,
+        *,
+        job_id: str,
+        client: ComfyUIClient,
+        client_id: str,
+        prompt_id: str,
+        activity: _WsActivity,
+    ) -> None:
         async for msg in client.ws_events(client_id=client_id):
-            await self._publish(job_id, {"type": "comfyui_ws", "data": msg})
             mtype = msg.get("type")
             data = msg.get("data", {})
+            if _is_own_prompt_event(
+                mtype=mtype,
+                pid=data.get("prompt_id") if isinstance(data, dict) else None,
+                prompt_id=prompt_id,
+            ):
+                # Only this job's own events keep the watchdog thinking the push
+                # channel is alive; foreign broadcasts must not mask a stall.
+                activity.last_event_at = asyncio.get_running_loop().time()
+            await self._publish(job_id, {"type": "comfyui_ws", "data": msg})
             if mtype == "executing" and isinstance(data, dict):
                 pid = data.get("prompt_id")
                 node = data.get("node")
@@ -773,6 +1034,56 @@ def _truncate_text(value: str, *, limit: int = 500) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "...[truncated]"
+
+
+async def _poll_history_entry(client: ComfyUIClient, prompt_id: str) -> tuple[bool, Dict[str, Any] | None]:
+    """(readable, entry) for one history probe.
+
+    "Cannot read" is reported separately from "not finished yet" because the
+    caller fails jobs on absence evidence: a broken `/history` must never be
+    mistaken for a prompt that left no trace.
+    """
+    try:
+        return True, await client.get_history_entry(prompt_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.info("history watchdog probe failed: prompt_id=%s error=%r", prompt_id, exc)
+        return False, None
+
+
+async def _queue_prompt_state(client: ComfyUIClient, prompt_id: str) -> QueuePromptState:
+    """Where a prompt currently sits on ComfyUI.
+
+    Returns QUEUE_STATE_UNKNOWN whenever the backend cannot answer or answers in
+    a shape we do not recognise, so a flaky probe can never fail a healthy job.
+    """
+    try:
+        payload = await client.get_queue()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.info("queue watchdog probe failed: prompt_id=%s error=%r", prompt_id, exc)
+        return QUEUE_STATE_UNKNOWN
+    if not isinstance(payload, dict):
+        return QUEUE_STATE_UNKNOWN
+    recognized = 0
+    for key, state in (("queue_running", QUEUE_STATE_RUNNING), ("queue_pending", QUEUE_STATE_PENDING)):
+        entries = payload.get(key)
+        if not isinstance(entries, list):
+            continue
+        recognized += 1
+        for entry in entries:
+            if isinstance(entry, (list, tuple)) and len(entry) > 1:
+                if str(entry[1]) == prompt_id:
+                    return state
+            elif isinstance(entry, dict) and str(entry.get("prompt_id") or "") == prompt_id:
+                return state
+    if not recognized:
+        # Unrecognised shape (another ComfyUI flavour / a proxy in front): never
+        # read that as "the prompt is gone".
+        return QUEUE_STATE_UNKNOWN
+    return QUEUE_STATE_MISSING
 
 
 def progress_percent_from_progress(progress: Dict[str, Any], *, status: str) -> int:
