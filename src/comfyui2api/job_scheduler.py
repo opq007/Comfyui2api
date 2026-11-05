@@ -193,70 +193,95 @@ class JobScheduler:
                 if record is None or not record.enabled:
                     await self.manager.fail_job(job_id, "The requested model is no longer available.")
                     return
-                slug = await self.manager.pool.choose_and_reserve(
-                    model_slug=job.model_slug,
-                    policy=record.routing_policy,
-                    pool_slugs=list(record.instance_slugs),
-                    exclude=exclude,
-                )
-                if slug is None:
-                    if attempt == 0:
-                        self.enqueue(job_id)
-                    else:
-                        await self.manager.fail_job(job_id, last_error)
-                    return
-                client = await self.manager.pool.client_for(slug)
-                held = True
-                staged_image = job.image
-                staged_params = dict(job.standard_params)
+                slug: str | None = None
+                # The reservation itself lives inside the try: from the moment a
+                # slot is taken, the `finally` releases it on every exit path.
+                # Taking the reservation outside used to leak `in_flight`, and a
+                # leaked reservation makes the instance unschedulable for good —
+                # `ready_slugs` skips it from then on while the dashboard still
+                # reports it healthy, so later jobs queue forever behind a slot
+                # nobody will free.
                 try:
-                    uploaded = await upload_staged_values(
-                        job=job,
-                        client=client,
-                        input_subdir=self.manager.cfg.input_subdir,
+                    slug = await self.manager.pool.choose_and_reserve(
+                        model_slug=job.model_slug,
+                        policy=record.routing_policy,
+                        pool_slugs=list(record.instance_slugs),
+                        exclude=exclude,
                     )
-                    await self.manager._update(
-                        job_id,
-                        instance_slug=slug,
-                        image=uploaded.get(job.image, job.image),
-                        standard_params=_rewrite_params(job.standard_params, uploaded),
-                    )
-                    await self.manager._run_job(job_id, client=client)
-                    return
-                except REROUTABLE_EXCEPTIONS as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
-                    current = await self.manager.get_job(job_id)
-                    if current is not None and current.prompt_id:
-                        # The prompt was already queued on ComfyUI and this job
-                        # is about to be failed: remove the queued entry so the
-                        # backend does not keep burning GPU on an abandoned
-                        # prompt. Entries already executing are left alone.
-                        await _cancel_comfy_prompt(client, current.prompt_id)
-                        await self.manager.fail_job(job_id, last_error)
+                    if slug is None:
+                        if attempt == 0:
+                            self.enqueue(job_id)
+                        else:
+                            await self.manager.fail_job(job_id, last_error)
                         return
-                    logger.info(
-                        "queue_prompt/upload failed, may reroute: job_id=%s instance=%s attempt=%s error=%s",
-                        job_id,
-                        slug,
-                        attempt,
-                        last_error,
-                    )
-                    await self.manager.pool.release(slug)
-                    held = False
-                    await self.manager._update(
-                        job_id,
-                        instance_slug="",
-                        image=staged_image,
-                        standard_params=staged_params,
-                    )
-                    job.image = staged_image
-                    job.standard_params = staged_params
-                    exclude.add(slug)
-                    if attempt >= MAX_REROUTE:
-                        await self.manager.fail_job(job_id, last_error)
+                    try:
+                        client = await self.manager.pool.client_for(slug)
+                    except LookupError as exc:
+                        # The instance stopped having a live client between the
+                        # reservation and the dispatch (deleted / re-created).
+                        # That is a submit-time failure, so spec §11.5 / item 10
+                        # apply: release, retry once elsewhere, then fail.
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        logger.info(
+                            "instance has no live client, may reroute: job_id=%s instance=%s attempt=%s error=%s",
+                            job_id,
+                            slug,
+                            attempt,
+                            last_error,
+                        )
+                        exclude.add(slug)
+                        if attempt >= MAX_REROUTE:
+                            await self.manager.fail_job(job_id, last_error)
+                            return
+                        continue
+                    staged_image = job.image
+                    staged_params = dict(job.standard_params)
+                    try:
+                        uploaded = await upload_staged_values(
+                            job=job,
+                            client=client,
+                            input_subdir=self.manager.cfg.input_subdir,
+                        )
+                        await self.manager._update(
+                            job_id,
+                            instance_slug=slug,
+                            image=uploaded.get(job.image, job.image),
+                            standard_params=_rewrite_params(job.standard_params, uploaded),
+                        )
+                        await self.manager._run_job(job_id, client=client)
                         return
+                    except REROUTABLE_EXCEPTIONS as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        current = await self.manager.get_job(job_id)
+                        if current is not None and current.prompt_id:
+                            # The prompt was already queued on ComfyUI and this job
+                            # is about to be failed: remove the queued entry so the
+                            # backend does not keep burning GPU on an abandoned
+                            # prompt. Entries already executing are left alone.
+                            await _cancel_comfy_prompt(client, current.prompt_id)
+                            await self.manager.fail_job(job_id, last_error)
+                            return
+                        logger.info(
+                            "queue_prompt/upload failed, may reroute: job_id=%s instance=%s attempt=%s error=%s",
+                            job_id,
+                            slug,
+                            attempt,
+                            last_error,
+                        )
+                        await self.manager._update(
+                            job_id,
+                            instance_slug="",
+                            image=staged_image,
+                            standard_params=staged_params,
+                        )
+                        job.image = staged_image
+                        job.standard_params = staged_params
+                        exclude.add(slug)
+                        if attempt >= MAX_REROUTE:
+                            await self.manager.fail_job(job_id, last_error)
+                            return
                 finally:
-                    if held:
+                    if slug is not None:
                         await self.manager.pool.release(slug)
         except Exception as exc:
             logger.exception("job dispatch failed: job_id=%s", job_id)

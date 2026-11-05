@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-23
-**Commit:** b48f1bd
+**Generated:** 2026-11-05
+**Commit:** 8dd695d
 **Branch:** main
 
 ## OVERVIEW
@@ -89,6 +89,8 @@ OpenAI-compatible FastAPI gateway over one or more ComfyUI backends. Python pack
 - Do not add `X-Forwarded-For` trust to `POST /v1/admin/shutdown` (loopback-only).
 - Do not put a token on `GET /health` (desktop wait + CI smoke + compose).
 - Sidecar `version` must be `1`; `kind` must match detected workflow kind.
+- Do not make job completion depend on the ComfyUI WebSocket alone. ComfyUI pushes `executing`/progress only to the socket registered under the prompt's `client_id` and drops what it sends before that socket attaches, so `jobs._await_completion` keeps a pull-based `/history` watchdog (plus a `/queue` liveness probe behind `WS_SILENCE_GRACE_S`). Without it a lost push leaves the job at `queued` 0%, holding its instance slot, until `TIMEOUT_S`.
+- Do not reserve an instance slot outside a `try/finally`. A leaked `in_flight` count makes `ready_slugs` skip that instance forever while the dashboard still reports it healthy, so later jobs queue behind a slot nobody frees.
 - Do not implement a new feature without grilling (`grill-me` / Metis + `question`) and confirmed acceptance criteria.
 - Do not "fix" a bug by treating symptoms. Find the root cause first.
 - Do not mark a feature or fix done without self-test evidence (unittest and/or `pnpm build` / frontend rebuild as applicable).
