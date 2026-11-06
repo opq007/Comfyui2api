@@ -949,6 +949,20 @@ tbody tr:hover {
   object-fit: contain;
 }
 
+/* Task drawer: let the preview grow for portrait media instead of clipping
+   it. `max-height: 100%` is cyclic against the content-sized grid row and
+   gets ignored by the browser, so the cap uses viewport units. The drawer
+   scrolls, so a taller preview just pushes the info grid down. */
+.task-drawer .preview-stage {
+  height: auto;
+  min-height: 260px;
+}
+
+.task-drawer .preview-stage img,
+.task-drawer .preview-stage video {
+  max-height: 62vh;
+}
+
 .empty-preview,
 .file-preview {
   display: grid;
@@ -1282,8 +1296,12 @@ tbody tr:hover {
 
 .playground-preview {
   flex: 1;
-  min-height: 0;
+  /* Definite guard + tracks so the media box resolves percentages against a
+     fixed area instead of its own content (which collapses/overflows). */
+  min-height: 280px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   overflow: hidden;
   border-radius: 8px;
@@ -1292,11 +1310,52 @@ tbody tr:hover {
 
 .playground-preview img,
 .playground-preview video {
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
+}
+
+.playground-result-meta {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.playground-result-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.playground-result-meta em {
+  font-style: normal;
+}
+
+.playground-result-meta strong {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playground-result-meta code {
+  max-width: 200px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-soft);
+  padding: 1px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .playground-progress {

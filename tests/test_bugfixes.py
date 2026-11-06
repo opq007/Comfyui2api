@@ -769,5 +769,92 @@ class WsSnapshotUrlDownloadTests(unittest.TestCase):
                 patcher.stop()
 
 
+class RunningEventInstanceSlugTests(unittest.IsolatedAsyncioTestCase):
+    """The per-job WS `job_running` frame must carry the executing instance.
+
+    The playground meta row shows which instance picked up the job; the
+    scheduler assigns the instance after `job_queued`, so the running delta is
+    the first push that knows it.
+    """
+
+    def _manager(self) -> object:
+        import comfyui2api.jobs as jobs_module
+        from tests.helpers import fake_job_deps
+
+        deps = fake_job_deps(runs_dir=Path("."))
+        return jobs_module.JobManager(
+            cfg=deps.cfg,
+            registry=SimpleNamespace(),
+            pool=deps.pool,
+            backend=deps.backend,
+        )
+
+    class _RecordingSocket:
+        """Hashable stand-in for a WebSocket that records pushed frames."""
+
+        def __init__(self) -> None:
+            self.frames: list[dict] = []
+            self.send_json = AsyncMock(side_effect=self._record)
+
+        def _record(self, payload: dict) -> None:
+            self.frames.append(payload)
+
+    async def _captured_frames(self, manager: object, job_id: str) -> list[dict]:
+        ws = self._RecordingSocket()
+        await manager.subscribe(job_id, ws)
+        try:
+            yield ws.frames
+        finally:
+            await manager.unsubscribe(job_id, ws)
+
+    async def test_monitor_ws_running_event_carries_instance_slug(self) -> None:
+        import comfyui2api.jobs as jobs_module
+
+        manager = self._manager()
+        job = await manager.create_job(kind="txt2img", workflow="test.json", prompt="hello")
+        await manager._update(job.job_id, instance_slug="gpu-a")
+
+        async def _events(client_id: str | None = None):
+            yield {"type": "executing", "data": {"prompt_id": "prompt-1", "node": "3"}}
+
+        client = SimpleNamespace(ws_events=lambda client_id=None: _events())
+        activity = jobs_module._WsActivity(last_event_at=asyncio.get_running_loop().time())
+
+        agen = self._captured_frames(manager, job.job_id)
+        frames = await agen.__anext__()
+        try:
+            await manager._monitor_ws(
+                job_id=job.job_id,
+                client=client,
+                client_id="client-1",
+                prompt_id="prompt-1",
+                activity=activity,
+            )
+        finally:
+            await agen.aclose()
+
+        running = [f for f in frames if f.get("type") == "job_running"]
+        self.assertEqual(len(running), 1)
+        self.assertEqual(running[0]["data"]["node"], "3")
+        self.assertEqual(running[0]["data"]["instance_slug"], "gpu-a")
+
+    async def test_watchdog_running_event_carries_instance_slug(self) -> None:
+        manager = self._manager()
+        job = await manager.create_job(kind="txt2img", workflow="test.json", prompt="hello")
+        await manager._update(job.job_id, instance_slug="gpu-a", status="queued")
+
+        agen = self._captured_frames(manager, job.job_id)
+        frames = await agen.__anext__()
+        try:
+            await manager._report_running_from_watchdog(job.job_id)
+        finally:
+            await agen.aclose()
+
+        running = [f for f in frames if f.get("type") == "job_running"]
+        self.assertEqual(len(running), 1)
+        self.assertIsNone(running[0]["data"]["node"])
+        self.assertEqual(running[0]["data"]["instance_slug"], "gpu-a")
+
+
 if __name__ == "__main__":
     unittest.main()

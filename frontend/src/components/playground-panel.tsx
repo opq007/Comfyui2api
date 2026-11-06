@@ -66,6 +66,7 @@ export function PlaygroundPanel(): React.ReactElement {
   const [rawResponse, setRawResponse] = useState<unknown>(null);
   const [job, setJob] = useState<PublicJob | null>(null);
   const [video, setVideo] = useState<PublicVideo | null>(null);
+  const [submittedMeta, setSubmittedMeta] = useState<{ modelName: string; modelSlug: string } | null>(null);
   const [showTrace, setShowTrace] = useState(false);
 
   const needsImage = kind === "img2img" || kind === "img2video";
@@ -161,7 +162,16 @@ export function PlaygroundPanel(): React.ReactElement {
           break;
         }
         case "job_running":
-          setJob((current) => (current ? { ...current, status: "running", current_node: entry.data.node ?? null } : current));
+          setJob((current) =>
+            current
+              ? {
+                  ...current,
+                  status: "running",
+                  current_node: entry.data.node ?? null,
+                  instance_slug: entry.data.instance_slug ?? current.instance_slug ?? null
+                }
+              : current
+          );
           if (isVideoLive && video?.status !== "running") {
             setVideo((current) => (current ? { ...current, status: "in_progress" } : current));
           }
@@ -266,6 +276,9 @@ export function PlaygroundPanel(): React.ReactElement {
     setError("");
     setJob(null);
     setVideo(null);
+    // Snapshot which model this submission targets so the result meta row stays
+    // truthful even if the picker changes mid-run.
+    setSubmittedMeta({ modelName: selected?.display_name || fields.model, modelSlug: fields.model });
     try {
       const result = await submitPlayground(kind, {
         ...fields,
@@ -281,6 +294,7 @@ export function PlaygroundPanel(): React.ReactElement {
         setVideo({ id: result.videoId, object: "video", status: "queued", progress: 0 });
       }
     } catch (err) {
+      setSubmittedMeta(null);
       if (err instanceof PublicAuthError) {
         setApiTokenNeeded(true);
       } else {
@@ -526,6 +540,19 @@ export function PlaygroundPanel(): React.ReactElement {
           </div>
         </form>
         <div className="playground-result">
+          {submittedMeta ? (
+            <div className="playground-result-meta">
+              <span>
+                <em>模型</em>
+                <strong title={submittedMeta.modelSlug}>{submittedMeta.modelName}</strong>
+                <code>{submittedMeta.modelSlug}</code>
+              </span>
+              <span>
+                <em>实例</em>
+                <strong title={job?.instance_slug ?? ""}>{job?.instance_slug?.trim() || "等待分配…"}</strong>
+              </span>
+            </div>
+          ) : null}
           <div className="preview-stage playground-preview">
             {previewUrl && (isAudio || looksAudio(previewUrl)) ? (
               <audio src={previewUrl} controls />
