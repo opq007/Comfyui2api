@@ -31,9 +31,12 @@ export interface TaskRecord {
   queue_number?: number | null;
   current_node?: string | null;
   url?: string | null;
+  media_type?: string | null;
   output_count: number;
   error?: string | null;
   prompt_preview?: string | null;
+  prompt_full?: string | null;
+  negative_prompt_full?: string | null;
   request_json?: Record<string, unknown>;
   outputs?: TaskOutput[];
 }
@@ -96,6 +99,7 @@ export interface TaskFilters {
   status?: string;
   kind?: string;
   platform?: string;
+  has_outputs?: string;
 }
 
 export interface WorkflowItem {
@@ -168,6 +172,7 @@ export interface PublicJob {
   model_slug?: string | null;
   requested_model?: string | null;
   instance_slug?: string | null;
+  request_json?: Record<string, unknown> | null;
 }
 
 export interface PublicVideo {
@@ -207,6 +212,10 @@ export interface PublicJobFailedEvent {
   type: "job_failed";
   data: { error?: string };
 }
+export interface PublicJobParamsEffectiveEvent {
+  type: "job_params_effective";
+  data: { standard_params: Record<string, unknown> };
+}
 export interface PublicJobWsErrorEvent {
   type: "error";
   data: { message?: string };
@@ -218,6 +227,7 @@ export type PublicJobWsEvent =
   | PublicJobQueuedEvent
   | PublicJobCompletedEvent
   | PublicJobFailedEvent
+  | PublicJobParamsEffectiveEvent
   | PublicJobWsErrorEvent;
 
 export interface PlaygroundRequestTrace {
@@ -306,6 +316,47 @@ export async function deleteModel(slug: string): Promise<{ status: string }> {
 
 export async function shutdownApp(): Promise<{ status: string }> {
   return requestJson<{ status: string }>("/v1/admin/shutdown", { method: "POST" });
+}
+
+/** A recorded playground submission. Task-derived fields (status/result_url/
+ * media_type/error) are joined from the tasks table at read time, so they
+ * disappear once the job ages out of retention. */
+export interface SubmissionRecord {
+  id: number;
+  created_at: number;
+  created_at_utc: string;
+  kind: string;
+  model?: string | null;
+  job_id?: string | null;
+  params: Record<string, unknown>;
+  status?: string | null;
+  result_url?: string | null;
+  media_type?: string | null;
+  error?: string | null;
+}
+
+export async function listSubmissions(limit = 50, offset = 0): Promise<{ total: number; items: SubmissionRecord[] }> {
+  const params = new URLSearchParams();
+  params.set("limit", String(Math.min(200, Math.max(1, limit))));
+  params.set("offset", String(Math.max(0, offset)));
+  return requestJson<{ total: number; items: SubmissionRecord[] }>(`/v1/admin/playground/submissions?${params.toString()}`);
+}
+
+export async function addSubmission(body: {
+  kind: string;
+  model: string;
+  params: Record<string, unknown>;
+  job_id: string;
+}): Promise<SubmissionRecord> {
+  return requestJson<SubmissionRecord>("/v1/admin/playground/submissions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function clearSubmissions(): Promise<{ deleted: number }> {
+  return requestJson<{ deleted: number }>("/v1/admin/playground/submissions", { method: "DELETE" });
 }
 
 export function adminWsUrl(token: string): string {

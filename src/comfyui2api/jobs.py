@@ -477,12 +477,14 @@ class JobManager:
             "kind": kind,
             "workflow": workflow,
             "model": requested_model or None,
-            "prompt": _truncate_text(prompt),
-            "negative_prompt": _truncate_text(negative_prompt),
+            # Stored untruncated: the dashboard reuses this payload to re-run a
+            # task, so a clipped prompt would silently change the generation.
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
             "seconds": seconds or None,
             "size": size or None,
             "quality": quality or None,
-            "metadata": _truncate_text(metadata),
+            "metadata": metadata,
             "standard_params": dict(standard_params or {}),
         }
         if image:
@@ -618,6 +620,15 @@ class JobManager:
             raw_seed = request_params.get("seed")
             if raw_seed in (None, "", -1, "-1"):
                 request_params["seed"] = random.randint(0, 2**32 - 1)
+        if request_params != dict(job.standard_params or {}):
+            # Persist the execution-effective params (randomized seed, derived
+            # inputImgCount) back onto the record. Without this the seed that
+            # actually produced the output is lost, so a result can never be
+            # reproduced or compared against a later re-roll.
+            summary = dict(job.request_json or {})
+            summary["standard_params"] = dict(request_params)
+            await self._update(job_id, standard_params=dict(request_params), request_json=summary)
+            await self._publish(job_id, {"type": "job_params_effective", "data": {"standard_params": dict(request_params)}})
 
         prompt_graph, extra_data, applied, prompt_trace = prepare_prompt(
             workflow_obj=job_obj,

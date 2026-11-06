@@ -44,6 +44,7 @@ def create_admin_router() -> APIRouter:
         status: str | None = None,
         kind: str | None = None,
         platform: str | None = None,
+        has_outputs: bool = Query(False),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
         authorization: str | None = Header(default=None),
@@ -57,6 +58,7 @@ def create_admin_router() -> APIRouter:
             statuses=_split_csv(status),
             kinds=_split_csv(kind),
             platforms=_split_csv(platform),
+            has_outputs=has_outputs,
             limit=limit,
             offset=offset,
         )
@@ -110,6 +112,58 @@ def create_admin_router() -> APIRouter:
             }
         )
         return base
+
+    @router.get("/playground/submissions")
+    async def list_playground_submissions(
+        request: Request,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        cfg = _cfg(request)
+        _require_admin_auth(request, authorization)
+        payload = await _store(request).list_submissions(limit=limit, offset=offset)
+        items = []
+        for raw in payload.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            # Result URLs are relative /runs/... paths; sign them so dashboard
+            # <img>/<video> tags can load the media without auth headers.
+            raw_result = str(item.get("result_url") or "")
+            if raw_result:
+                item["result_url"] = _authorized_url(request, cfg, raw_result)
+            items.append(item)
+        payload["items"] = items
+        return payload
+
+    @router.post("/playground/submissions")
+    async def add_playground_submission(
+        request: Request,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_admin_auth(request, authorization)
+        if not str(body.get("job_id") or "").strip():
+            raise _admin_error(400, "job_id is required")
+        record = await _store(request).add_submission(
+            kind=str(body.get("kind") or ""),
+            model=str(body.get("model") or ""),
+            params=dict(body.get("params") or {}) if isinstance(body.get("params"), dict) else {},
+            job_id=str(body.get("job_id") or ""),
+        )
+        raw_result = str(record.get("result_url") or "")
+        if raw_result:
+            record["result_url"] = _authorized_url(request, _cfg(request), raw_result)
+        return record
+
+    @router.delete("/playground/submissions")
+    async def clear_playground_submissions(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_admin_auth(request, authorization)
+        return await _store(request).clear_submissions()
 
     @router.get("/workflows")
     async def workflows(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 import type React from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -9,11 +9,15 @@ import {
   type SortingState,
   type VisibilityState
 } from "@tanstack/react-table";
-import { ChevronLeft, ChevronRight, Columns3, Copy, Eye } from "lucide-react";
+import { ChevronLeft, ChevronRight, Columns3, Copy, Eye, FileQuestion } from "lucide-react";
 import type { TaskRecord } from "../lib/api";
 import { compactId, formatDateTime, formatDuration } from "../lib/format";
+import { MediaThumb } from "./media-thumb";
 import { ProgressCell } from "./progress-cell";
 import { kindLabels, StatusBadge } from "./status-badge";
+import { copyText } from "./toast";
+
+const COLUMN_STORAGE_KEY = "comfyui2api.tasks.columns";
 
 interface TaskTableProps {
   items: TaskRecord[];
@@ -24,15 +28,42 @@ interface TaskTableProps {
   onOpenTask: (task: TaskRecord) => void;
 }
 
+function defaultColumnVisibility(): VisibilityState {
+  return { finished_at_utc: false, platform: false };
+}
+
+function restoreColumnVisibility(): VisibilityState {
+  try {
+    const raw = window.localStorage.getItem(COLUMN_STORAGE_KEY);
+    if (raw) {
+      return { ...defaultColumnVisibility(), ...(JSON.parse(raw) as VisibilityState) };
+    }
+  } catch {
+    // corrupted snapshot falls back to defaults
+  }
+  return defaultColumnVisibility();
+}
+
+function promptSnippet(task: TaskRecord): string {
+  return task.prompt_full || task.prompt_preview || "";
+}
+
 export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onOpenTask }: TaskTableProps): React.ReactElement {
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({
-    finished_at_utc: false,
-    platform: false
-  });
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(restoreColumnVisibility);
+
+  useEffect(() => {
+    window.localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(columnVisibility));
+  }, [columnVisibility]);
 
   const columns = useMemo<ColumnDef<TaskRecord>[]>(
     () => [
+      {
+        id: "thumb",
+        header: "",
+        enableSorting: false,
+        cell: ({ row }) => <ThumbCell task={row.original} />
+      },
       {
         accessorKey: "created_at_utc",
         header: "提交时间",
@@ -63,6 +94,20 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
         cell: ({ row }) => <span className="kind-pill">{kindLabels[row.original.kind] ?? row.original.kind}</span>
       },
       {
+        id: "prompt",
+        header: "提示词",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const text = promptSnippet(row.original);
+          if (!text) return <span className="muted">--</span>;
+          return (
+            <span className="prompt-snippet" title={text}>
+              {text}
+            </span>
+          );
+        }
+      },
+      {
         accessorKey: "job_id",
         header: "任务 ID",
         cell: ({ row }) => (
@@ -71,7 +116,7 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              void navigator.clipboard.writeText(row.original.job_id);
+              void copyText(row.original.job_id, "任务 ID 已复制");
             }}
             title={row.original.job_id}
           >
@@ -134,7 +179,7 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
       <div className="panel-header">
         <div>
           <h2>任务队列与历史记录</h2>
-          <p>WebSocket 实时推送，断线后自动轮询</p>
+          <p>WebSocket 实时推送，断线后自动轮询；排序仅对当前页生效</p>
         </div>
         <details className="column-menu">
           <summary>
@@ -161,9 +206,13 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <th key={header.id}>
+                  <th key={header.id} className={header.column.id === "thumb" || header.column.id === "prompt" ? "no-sort" : ""}>
                     {header.isPlaceholder ? null : (
-                      <button type="button" onClick={header.column.getToggleSortingHandler()}>
+                      <button
+                        type="button"
+                        onClick={header.column.getToggleSortingHandler()}
+                        disabled={header.column.id === "thumb" || header.column.id === "prompt"}
+                      >
                         {flexRender(header.column.columnDef.header, header.getContext())}
                         <span>{header.column.getIsSorted() === "asc" ? "↑" : header.column.getIsSorted() === "desc" ? "↓" : ""}</span>
                       </button>
@@ -175,7 +224,7 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.id} onClick={() => onOpenTask(row.original)}>
+              <tr key={row.id} className="clickable" onClick={() => onOpenTask(row.original)}>
                 {row.getVisibleCells().map((cell) => (
                   <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
                 ))}
@@ -193,7 +242,7 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
       </div>
       <div className="pagination">
         <span>
-          显示 {items.length} / 共 {total} 条记录
+          显示 {items.length} / 共 {total} 条记录{pageCount > 0 ? ` · 第 ${pageIndex + 1}/${pageCount} 页` : ""}
         </span>
         <div>
           <button type="button" onClick={() => onPageChange(pageIndex - 1)} disabled={!canPrev} title="上一页">
@@ -206,5 +255,18 @@ export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onO
         </div>
       </div>
     </section>
+  );
+}
+
+function ThumbCell({ task }: { task: TaskRecord }): React.ReactElement {
+  const url = task.outputs?.[0]?.url || task.url || "";
+  const mediaType = task.outputs?.[0]?.media_type || task.media_type || "";
+  return (
+    <MediaThumb
+      className="row-thumb"
+      url={url}
+      mediaType={mediaType}
+      fallback={task.output_count > 0 ? <FileQuestion size={16} /> : null}
+    />
   );
 }
