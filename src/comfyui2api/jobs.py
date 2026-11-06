@@ -887,7 +887,10 @@ class JobManager:
         if job is None or job.status == "running":
             return
         await self._update(job_id, status="running", persist=True)
-        await self._publish(job_id, {"type": "job_running", "data": {"node": None}})
+        await self._publish(
+            job_id,
+            {"type": "job_running", "data": {"node": None, "instance_slug": job.instance_slug or None}},
+        )
 
     async def _history_after_ws_end(
         self,
@@ -953,8 +956,14 @@ class JobManager:
                     return
                 # Persist the transitioning node id (rare), but do not write
                 # SQLite for every progress message.
-                await self._update(job_id, status="running", current_node=str(node), persist=True)
-                await self._publish(job_id, {"type": "job_running", "data": {"node": str(node)}})
+                updated = await self._update(job_id, status="running", current_node=str(node), persist=True)
+                await self._publish(
+                    job_id,
+                    {
+                        "type": "job_running",
+                        "data": {"node": str(node), "instance_slug": (updated.instance_slug if updated else None) or None},
+                    },
+                )
             elif mtype == "execution_success" and isinstance(data, dict):
                 pid = data.get("prompt_id")
                 if pid and pid != prompt_id:

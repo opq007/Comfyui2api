@@ -165,6 +165,9 @@ export interface PublicJob {
   error?: string | null;
   url?: string | null;
   outputs?: TaskOutput[];
+  model_slug?: string | null;
+  requested_model?: string | null;
+  instance_slug?: string | null;
 }
 
 export interface PublicVideo {
@@ -190,7 +193,7 @@ export interface PublicJobProgressEvent {
 }
 export interface PublicJobRunningEvent {
   type: "job_running";
-  data: { node?: string | null };
+  data: { node?: string | null; instance_slug?: string | null };
 }
 export interface PublicJobQueuedEvent {
   type: "job_queued";
