@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -25,13 +25,16 @@ import { compactId } from "./lib/format";
 import { connectAdminSocket, type AdminSocket } from "./lib/websocket";
 import { AppShell } from "./components/app-shell";
 import type { DashboardView } from "./components/app-shell";
+import { ConfirmHost, confirmDialog } from "./components/confirm";
+import { MediaThumb } from "./components/media-thumb";
 import { InstancesPanel, ModelsPanel } from "./components/backend-panels";
-import { PlaygroundPanel } from "./components/playground-panel";
+import { PlaygroundPanel, type PlaygroundPrefill } from "./components/playground-panel";
 import { SettingsPanel } from "./components/settings-panel";
 import { StatusCards } from "./components/status-cards";
 import { TaskFiltersBar } from "./components/task-filters";
 import { TaskPreviewDrawer } from "./components/task-preview-drawer";
 import { TaskTable } from "./components/task-table";
+import { ToastHost } from "./components/toast";
 import { TokenGate } from "./components/token-gate";
 import type { ThemeMode } from "./components/theme-toggle";
 
@@ -44,6 +47,7 @@ const zeroCounts: Record<TaskStatus, number> = {
 };
 
 const TASK_PAGE_SIZE = 50;
+const FILTER_KEYS = ["start", "end", "q", "status", "kind", "platform"] as const;
 
 const emptyList: TaskListResponse = {
   total: 0,
@@ -51,10 +55,33 @@ const emptyList: TaskListResponse = {
   items: []
 };
 
+function readFiltersFromUrl(): TaskFilters {
+  const params = new URLSearchParams(window.location.search);
+  const filters: TaskFilters = {};
+  for (const key of FILTER_KEYS) {
+    const value = params.get(key);
+    if (value) filters[key] = value;
+  }
+  return filters;
+}
+
+function writeFiltersToUrl(filters: TaskFilters): void {
+  const params = new URLSearchParams();
+  for (const key of FILTER_KEYS) {
+    const value = filters[key];
+    if (value) params.set(key, value);
+  }
+  const query = params.toString();
+  window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+}
+
 export function App(): React.ReactElement {
-  const [theme, setTheme] = useState<ThemeMode>(() => (window.localStorage.getItem("comfyui2api.theme") as ThemeMode) || "light");
-  const [filters, setFilters] = useState<TaskFilters>({});
-  const [appliedFilters, setAppliedFilters] = useState<TaskFilters>({});
+  const [theme, setTheme] = useState<ThemeMode>(
+    () =>
+      (window.localStorage.getItem("comfyui2api.theme") as ThemeMode | null) ||
+      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+  );
+  const [filters, setFilters] = useState<TaskFilters>(readFiltersFromUrl);
   const [tasks, setTasks] = useState<TaskListResponse>(emptyList);
   const [taskPage, setTaskPage] = useState(0);
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -73,13 +100,36 @@ export function App(): React.ReactElement {
   const [models, setModels] = useState<ExternalModelRecord[]>([]);
   const [backendLoading, setBackendLoading] = useState(false);
   const [quitting, setQuitting] = useState(false);
+  const [playgroundPrefill, setPlaygroundPrefill] = useState<PlaygroundPrefill | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("comfyui2api.theme", theme);
   }, [theme]);
 
-  const apiFilters = useMemo(() => toApiFilters(appliedFilters), [appliedFilters]);
+  // Filters are the single source of truth and apply immediately; the URL
+  // mirrors them so a filtered view survives a reload and can be shared.
+  const handleFiltersChange = useCallback((next: TaskFilters): void => {
+    setFilters(next);
+    setTaskPage(0);
+    writeFiltersToUrl(next);
+  }, []);
+
+  const resetFilters = useCallback((): void => {
+    setFilters({});
+    setTaskPage(0);
+    writeFiltersToUrl({});
+  }, []);
+
+  const apiFilters = useMemo(() => toApiFilters(filters), [filters]);
+
+  // Refs mirror the latest values for the WebSocket handler below, so the
+  // socket is not torn down and reconnected every time a filter or page
+  // changes while still merging events against current state.
+  const apiFiltersRef = useRef(apiFilters);
+  apiFiltersRef.current = apiFilters;
+  const taskPageRef = useRef(taskPage);
+  taskPageRef.current = taskPage;
 
   const refresh = useCallback(async () => {
     if (!getAdminToken()) {
@@ -119,7 +169,7 @@ export function App(): React.ReactElement {
     let retryId = 0;
     let socket: AdminSocket | null = null;
 
-    function handleWsEvent(event: { type: string; data?: TaskListResponse; job?: TaskRecord }): void {
+    function handleWsEvent(event: { type: string; data?: TaskListResponse; job?: TaskRecord; event?: string }): void {
       if (event.type === "snapshot" && event.data) {
         // Keep current page items; only refresh counts/total so pagination is
         // not clobbered by the socket's initial 50-item snapshot.
@@ -130,7 +180,7 @@ export function App(): React.ReactElement {
         }));
       }
       if (event.type === "task_updated" && event.job) {
-        setTasks((current) => mergeTask(current, event.job as TaskRecord));
+        setTasks((current) => mergeTask(current, event.job as TaskRecord, event.event ?? "", taskPageRef.current, apiFiltersRef.current));
       }
     }
 
@@ -244,7 +294,13 @@ export function App(): React.ReactElement {
 
   const handleShutdown = useCallback(async () => {
     if (quitting) return;
-    if (!window.confirm("确定要退出 comfyui2api 吗？当前服务会停止。")) return;
+    const ok = await confirmDialog({
+      title: "退出 comfyui2api",
+      message: "当前服务会停止，所有进行中的任务将被中断。确定退出吗？",
+      confirmLabel: "退出",
+      danger: true
+    });
+    if (!ok) return;
     setQuitting(true);
     setError("");
     try {
@@ -260,6 +316,36 @@ export function App(): React.ReactElement {
       }
     }
   }, [quitting]);
+
+  const filterTasksByStatus = useCallback(
+    (status: string): void => {
+      handleFiltersChange(status ? { status } : {});
+      setActiveView("tasks");
+    },
+    [handleFiltersChange]
+  );
+
+  // Drawer target from the playground: only the id is known there, the drawer
+  // effect fetches the full record right after.
+  const openTaskById = useCallback((jobId: string): void => {
+    setSelectedTask({
+      job_id: jobId,
+      created_at: 0,
+      created_at_utc: "",
+      platform: "",
+      kind: "",
+      workflow: "",
+      status: "queued",
+      progress_percent: 0,
+      output_count: 0
+    });
+  }, []);
+
+  const reuseInPlayground = useCallback((prefill: PlaygroundPrefill): void => {
+    setPlaygroundPrefill(prefill);
+    setSelectedTask(null);
+    setActiveView("playground");
+  }, []);
 
   if (authNeeded) {
     return (
@@ -296,26 +382,14 @@ export function App(): React.ReactElement {
       {error ? <div className="error-banner">{error}</div> : null}
       {activeView === "overview" ? (
         <div className="view-stack">
-          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
+          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} onFilter={filterTasksByStatus} />
           <OverviewPanel stats={stats} total={total} />
         </div>
       ) : null}
       {activeView === "tasks" ? (
         <div className="view-stack">
-          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
-          <TaskFiltersBar
-            filters={filters}
-            onChange={setFilters}
-            onApply={() => {
-              setTaskPage(0);
-              setAppliedFilters(filters);
-            }}
-            onReset={() => {
-              setFilters({});
-              setTaskPage(0);
-              setAppliedFilters({});
-            }}
-          />
+          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} onFilter={filterTasksByStatus} />
+          <TaskFiltersBar filters={filters} onChange={handleFiltersChange} onReset={resetFilters} />
           <TaskTable
             items={tasks.items}
             total={tasks.total}
@@ -328,7 +402,11 @@ export function App(): React.ReactElement {
       ) : null}
       {activeView === "playground" ? (
         <div className="view-stack">
-          <PlaygroundPanel />
+          <PlaygroundPanel
+            prefill={playgroundPrefill}
+            onPrefillConsumed={() => setPlaygroundPrefill(null)}
+            onOpenTask={openTaskById}
+          />
         </div>
       ) : null}
       {activeView === "workflows" ? (
@@ -362,6 +440,7 @@ export function App(): React.ReactElement {
         detail={detail}
         loading={detailLoading}
         onClose={() => setSelectedTask(null)}
+        onReuseInPlayground={reuseInPlayground}
       />
       {settingsOpen ? (
         <SettingsPanel
@@ -371,6 +450,8 @@ export function App(): React.ReactElement {
           onShutdown={() => void handleShutdown()}
         />
       ) : null}
+      <ToastHost />
+      <ConfirmHost />
     </AppShell>
   );
 }
@@ -458,14 +539,10 @@ function OutputsPanel({ onOpenTask }: { onOpenTask: (task: TaskRecord) => void }
     setOutputLoading(true);
     setOutputError("");
     try {
-      // Backend has no output_count filter; fetch a page and keep only tasks
-      // that actually produced files, then paginate that filtered window.
-      const limit = 200;
-      const offset = Math.floor(page / 10) * limit;
-      const payload = await listTasks({}, limit, offset);
-      const withOutputs = payload.items.filter((task) => task.output_count > 0 || Boolean(task.url));
+      // Server-side `has_outputs` filter keeps total and pagination truthful.
+      const payload = await listTasks({ has_outputs: "1" }, pageSize, page * pageSize);
+      setOutputs(payload.items);
       setOutputTotal(payload.total);
-      setOutputs(withOutputs);
     } catch (err) {
       if (err instanceof AuthError) {
         clearAdminToken();
@@ -479,52 +556,40 @@ function OutputsPanel({ onOpenTask }: { onOpenTask: (task: TaskRecord) => void }
   }, []);
 
   useEffect(() => {
-    void loadOutputs(0);
-  }, [loadOutputs]);
+    void loadOutputs(outputPage);
+  }, [loadOutputs, outputPage]);
+
+  const pageCount = outputTotal > 0 ? Math.ceil(outputTotal / pageSize) : 0;
 
   return (
     <section className="view-panel">
       <div className="panel-header">
         <div>
           <h2>最近输出</h2>
-          <p>有产物的任务预览与分页浏览</p>
+          <p>有产物的任务，缩略图点击查看任务详情</p>
         </div>
       </div>
       {outputError ? <div className="error-banner">{outputError}</div> : null}
       <div className="output-grid">
         {outputLoading ? <div className="empty-state compact">正在加载输出…</div> : null}
         {!outputLoading &&
-          outputs.slice(0, 20).map((task) => (
-            <OutputCard task={task} key={task.job_id} onOpen={() => onOpenTask(task)} />
-          ))}
+          outputs.map((task) => <OutputCard task={task} key={task.job_id} onOpen={() => onOpenTask(task)} />)}
         {!outputLoading && outputs.length === 0 ? <div className="empty-state compact">没有可显示的输出文件</div> : null}
       </div>
       <div className="pagination">
         <span>
           显示 {outputs.length} / 共 {outputTotal} 条带产物记录
+          {pageCount > 0 ? ` · 第 ${outputPage + 1}/${pageCount} 页` : ""}
         </span>
         <div>
-          <button
-            type="button"
-            disabled={outputPage === 0}
-            onClick={() => {
-              const next = Math.max(0, outputPage - 1);
-              setOutputPage(next);
-              void loadOutputs(next);
-            }}
-            title="上一页"
-          >
+          <button type="button" disabled={outputPage === 0} onClick={() => setOutputPage(outputPage - 1)} title="上一页">
             <ChevronLeft size={16} />
           </button>
           <strong>{outputPage + 1}</strong>
           <button
             type="button"
-            disabled={outputs.length === 0}
-            onClick={() => {
-              const next = outputPage + 1;
-              setOutputPage(next);
-              void loadOutputs(next);
-            }}
+            disabled={outputPage >= pageCount - 1}
+            onClick={() => setOutputPage(outputPage + 1)}
             title="下一页"
           >
             <ChevronRight size={16} />
@@ -536,25 +601,25 @@ function OutputsPanel({ onOpenTask }: { onOpenTask: (task: TaskRecord) => void }
 }
 
 function OutputCard({ task, onOpen }: { task: TaskRecord; onOpen: () => void }): React.ReactElement {
-  const preview = task.outputs?.find((output) => output.media_type?.startsWith("image/") || output.media_type?.startsWith("video/"));
   return (
     <button className="output-card" type="button" onClick={onOpen} title={task.job_id}>
-      {preview ? <OutputThumb media={preview} /> : null}
-      <strong>{task.workflow}</strong>
+      <OutputThumb task={task} />
+      <strong>{task.model_slug || task.workflow}</strong>
       <span>{compactId(task.job_id, 16)}</span>
       <small>{task.output_count} 个文件</small>
     </button>
   );
 }
 
-function OutputThumb({ media }: { media: { url: string; media_type?: string | null } }): React.ReactElement | null {
-  if (media.media_type?.startsWith("video/")) {
-    return <video src={media.url} muted playsInline preload="metadata" />;
-  }
-  if (media.media_type?.startsWith("image/")) {
-    return <img src={media.url} alt="output" />;
-  }
-  return null;
+function OutputThumb({ task }: { task: TaskRecord }): React.ReactElement {
+  return (
+    <MediaThumb
+      className="output-thumb-media"
+      url={task.url || ""}
+      mediaType={task.media_type}
+      fallback={`${task.output_count} 个文件`}
+    />
+  );
 }
 
 function RuntimeTile({ label, value }: { label: string; value?: string }): React.ReactElement {
@@ -574,15 +639,37 @@ function toApiFilters(filters: TaskFilters): TaskFilters {
   };
 }
 
-function mergeTask(current: TaskListResponse, task: TaskRecord): TaskListResponse {
-  // Replace in-place if the job is already on this page; otherwise the item
-  // belongs on another page (its screen position is unknown), so only update
-  // totals. Avoids injecting off-page rows into the current page mid-stream.
+function mergeTask(
+  current: TaskListResponse,
+  task: TaskRecord,
+  eventName: string,
+  pageIndex: number,
+  filters: TaskFilters
+): TaskListResponse {
+  // Replace in-place if the job is already on this page. A brand-new task
+  // (job_created) joins the top of page 0 so a submission shows up without a
+  // manual refresh — but only when it actually matches the active filters,
+  // otherwise the injected row and the inflated total would contradict the
+  // server's next snapshot. Text/time filters cannot be checked cheaply, so
+  // with q/start/end set the list is left to the next refresh.
   const exists = current.items.some((item) => item.job_id === task.job_id);
   if (!exists) {
+    if (eventName !== "job_created") return current;
+    const anyFreeText = Boolean(filters.q || filters.start || filters.end);
+    const matches =
+      !anyFreeText &&
+      (["status", "kind", "platform"] as const).every((key) => {
+        const raw = filters[key];
+        if (!raw) return true;
+        const allowed = raw.split(",").map((item) => item.trim()).filter(Boolean);
+        return allowed.length === 0 || allowed.includes(String(task[key] ?? ""));
+      });
+    if (!matches) return current;
+    const items = pageIndex === 0 ? [task, ...current.items].slice(0, TASK_PAGE_SIZE) : current.items;
     return {
       ...current,
-      total: Math.max(current.total, 1)
+      items,
+      total: current.total + 1
     };
   }
   return {

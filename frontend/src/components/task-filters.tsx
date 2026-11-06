@@ -4,12 +4,13 @@ import type { TaskFilters } from "../lib/api";
 
 interface TaskFiltersProps {
   filters: TaskFilters;
+  /** Applied on every change: the dashboard treats filters as live, so a
+   * forgotten "apply" click can silently hide rows. */
   onChange: (filters: TaskFilters) => void;
-  onApply: () => void;
   onReset: () => void;
 }
 
-export function TaskFiltersBar({ filters, onChange, onApply, onReset }: TaskFiltersProps): React.ReactElement {
+export function TaskFiltersBar({ filters, onChange, onReset }: TaskFiltersProps): React.ReactElement {
   const update = (key: keyof TaskFilters, value: string): void => {
     onChange({ ...filters, [key]: value || undefined });
   };
@@ -39,7 +40,7 @@ export function TaskFiltersBar({ filters, onChange, onApply, onReset }: TaskFilt
         <input
           value={filters.q ?? ""}
           onChange={(event) => update("q", event.target.value)}
-          placeholder="任务 ID / prompt_id"
+          placeholder="任务 ID / prompt_id / 提示词"
         />
       </label>
       <select value={filters.status ?? ""} onChange={(event) => update("status", event.target.value)} title="状态">
@@ -55,6 +56,7 @@ export function TaskFiltersBar({ filters, onChange, onApply, onReset }: TaskFilt
         <option value="img2img">图生图</option>
         <option value="txt2video">文生视频</option>
         <option value="img2video">图生视频</option>
+        <option value="txt2audio">文生语音</option>
       </select>
       <select value={filters.platform ?? ""} onChange={(event) => update("platform", event.target.value)} title="平台">
         <option value="">平台</option>
@@ -66,9 +68,6 @@ export function TaskFiltersBar({ filters, onChange, onApply, onReset }: TaskFilt
       <button className="ghost-button" type="button" onClick={onReset}>
         <RotateCcw size={15} />
         重置
-      </button>
-      <button className="primary-button" type="button" onClick={onApply}>
-        查询
       </button>
     </section>
   );

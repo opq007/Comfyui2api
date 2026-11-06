@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .jobs import Job, JobOutput
-from .util import utc_now_iso, utc_now_unix
+from .util import guess_media_type, utc_now_iso, utc_now_unix
 
 
 STATUSES = ("pending", "queued", "running", "completed", "failed")
+
+# Playground submissions kept in the ring buffer; older rows are pruned on
+# every insert so the history table cannot grow unbounded.
+SUBMISSION_RETENTION = 200
 
 
 class JobStore:
@@ -40,6 +44,7 @@ class JobStore:
         statuses: list[str] | None = None,
         kinds: list[str] | None = None,
         platforms: list[str] | None = None,
+        has_outputs: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -51,6 +56,7 @@ class JobStore:
             statuses or None,
             kinds or None,
             platforms or None,
+            bool(has_outputs),
             max(1, min(200, int(limit))),
             max(0, int(offset)),
         )
@@ -60,6 +66,19 @@ class JobStore:
 
     async def mark_unfinished_interrupted(self) -> None:
         await self._run_sync(self._mark_unfinished_interrupted_sync)
+
+    async def add_submission(self, *, kind: str, model: str, params: dict[str, Any], job_id: str) -> dict[str, Any]:
+        return await self._run_sync(self._add_submission_sync, kind, model, params, job_id)
+
+    async def list_submissions(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        return await self._run_sync(
+            self._list_submissions_sync,
+            max(1, min(200, int(limit))),
+            max(0, int(offset)),
+        )
+
+    async def clear_submissions(self) -> dict[str, Any]:
+        return await self._run_sync(self._clear_submissions_sync)
 
     async def _run_sync(self, fn: Any, *args: Any) -> Any:
         async with self._lock:
@@ -139,10 +158,27 @@ class JobStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_task_outputs_job_id ON task_outputs(job_id);
+
+                CREATE TABLE IF NOT EXISTS playground_submissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at INTEGER NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    model TEXT,
+                    params_json TEXT NOT NULL,
+                    job_id TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_pg_submissions_created ON playground_submissions(created_at);
                 """
             )
             _ensure_column(con, "tasks", "model_slug", "TEXT")
             _ensure_column(con, "tasks", "instance_slug", "TEXT")
+            # Full, never-truncated prompts. `prompt_preview` stays as the short
+            # display snippet; rows written before this migration keep NULL here
+            # and the UI falls back to the truncated preview for them.
+            _ensure_column(con, "tasks", "prompt_full", "TEXT")
+            _ensure_column(con, "tasks", "negative_prompt_full", "TEXT")
             con.commit()
 
     def _upsert_job_sync(self, job: Job) -> None:
@@ -155,13 +191,13 @@ class JobStore:
                     updated_at_utc, duration_s, platform, kind, workflow, requested_model,
                     model_slug, instance_slug, status, progress_percent, progress_json,
                     prompt_id, queue_number, current_node, url, output_count, error,
-                    prompt_preview, request_json
+                    prompt_preview, request_json, prompt_full, negative_prompt_full
                 ) VALUES (
                     :job_id, :created_at, :created_at_utc, :started_at_utc, :finished_at_utc,
                     :updated_at_utc, :duration_s, :platform, :kind, :workflow, :requested_model,
                     :model_slug, :instance_slug, :status, :progress_percent, :progress_json,
                     :prompt_id, :queue_number, :current_node, :url, :output_count, :error,
-                    :prompt_preview, :request_json
+                    :prompt_preview, :request_json, :prompt_full, :negative_prompt_full
                 )
                 ON CONFLICT(job_id) DO UPDATE SET
                     started_at_utc=excluded.started_at_utc,
@@ -184,7 +220,9 @@ class JobStore:
                     output_count=excluded.output_count,
                     error=excluded.error,
                     prompt_preview=excluded.prompt_preview,
-                    request_json=excluded.request_json
+                    request_json=excluded.request_json,
+                    prompt_full=excluded.prompt_full,
+                    negative_prompt_full=excluded.negative_prompt_full
                 """,
                 payload,
             )
@@ -237,6 +275,7 @@ class JobStore:
         statuses: list[str] | None,
         kinds: list[str] | None,
         platforms: list[str] | None,
+        has_outputs: bool,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -247,6 +286,7 @@ class JobStore:
             statuses=statuses,
             kinds=kinds,
             platforms=platforms,
+            has_outputs=has_outputs,
         )
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as con:
@@ -267,7 +307,15 @@ class JobStore:
         counts = {status: 0 for status in STATUSES}
         for row in count_rows:
             counts[str(row["status"])] = int(row["count"])
-        items = [_task_from_row(row) | {"outputs": []} for row in rows]
+        items = []
+        for row in rows:
+            item = _task_from_row(row) | {"outputs": []}
+            # Media type of the primary output, derived from its filename so the
+            # dashboard can render thumbnails without a per-task detail fetch.
+            primary_name = Path(str(item.get("url") or "")).name
+            if primary_name:
+                item["media_type"] = guess_media_type(primary_name)
+            items.append(item)
         return {"total": total, "counts": counts, "items": items}
 
     def _stats_sync(self) -> dict[str, Any]:
@@ -297,6 +345,76 @@ class JobStore:
             )
             con.commit()
 
+    def _add_submission_sync(self, kind: str, model: str, params: dict[str, Any], job_id: str) -> dict[str, Any]:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            raise ValueError("job_id is required for a playground submission")
+        now_unix = utc_now_unix()
+        now_iso = utc_now_iso()
+        with self._connect() as con:
+            cursor = con.execute(
+                """
+                INSERT INTO playground_submissions (created_at, created_at_utc, kind, model, params_json, job_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_unix,
+                    now_iso,
+                    str(kind or ""),
+                    str(model or "") or None,
+                    json.dumps(params or {}, ensure_ascii=False),
+                    job_id,
+                ),
+            )
+            # Ring buffer: drop everything beyond the newest SUBMISSION_RETENTION rows.
+            con.execute(
+                """
+                DELETE FROM playground_submissions
+                WHERE id NOT IN (
+                    SELECT id FROM playground_submissions ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (SUBMISSION_RETENTION,),
+            )
+            con.commit()
+            return self._submission_by_id(con, int(cursor.lastrowid))
+
+    def _submission_by_id(self, con: sqlite3.Connection, submission_id: int) -> dict[str, Any]:
+        row = con.execute(
+            """
+            SELECT s.id, s.created_at, s.created_at_utc, s.kind, s.model, s.params_json, s.job_id,
+                   t.status AS task_status, t.url AS task_url, t.error AS task_error
+            FROM playground_submissions s
+            LEFT JOIN tasks t ON t.job_id = s.job_id
+            WHERE s.id = ?
+            """,
+            (submission_id,),
+        ).fetchone()
+        return _submission_from_row(row)
+
+    def _list_submissions_sync(self, limit: int, offset: int) -> dict[str, Any]:
+        with self._connect() as con:
+            total = int(con.execute("SELECT COUNT(*) FROM playground_submissions").fetchone()[0])
+            rows = con.execute(
+                """
+                SELECT s.id, s.created_at, s.created_at_utc, s.kind, s.model, s.params_json, s.job_id,
+                       t.status AS task_status, t.url AS task_url, t.error AS task_error
+                FROM playground_submissions s
+                LEFT JOIN tasks t ON t.job_id = s.job_id
+                ORDER BY s.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        items = [_submission_from_row(row) for row in rows]
+        return {"total": total, "items": items}
+
+    def _clear_submissions_sync(self) -> dict[str, Any]:
+        with self._connect() as con:
+            cursor = con.execute("DELETE FROM playground_submissions")
+            con.commit()
+            return {"deleted": int(cursor.rowcount)}
+
 
 def _job_to_row(job: Job) -> dict[str, Any]:
     return {
@@ -324,6 +442,8 @@ def _job_to_row(job: Job) -> dict[str, Any]:
         "error": job.error or None,
         "prompt_preview": _truncate(job.prompt or ""),
         "request_json": json.dumps(job.request_json or {}, ensure_ascii=False),
+        "prompt_full": job.prompt or None,
+        "negative_prompt_full": job.negative_prompt or None,
     }
 
 
@@ -335,6 +455,7 @@ def _build_filters(
     statuses: list[str] | None,
     kinds: list[str] | None,
     platforms: list[str] | None,
+    has_outputs: bool = False,
 ) -> tuple[list[str], list[Any]]:
     where: list[str] = []
     params: list[Any] = []
@@ -346,8 +467,16 @@ def _build_filters(
         params.append(end)
     if q:
         like = f"%{q}%"
-        where.append("(job_id LIKE ? OR prompt_id LIKE ? OR workflow LIKE ? OR error LIKE ?)")
-        params.extend([like, like, like, like])
+        # prompt_full/prompt_preview let the dashboard find tasks by prompt
+        # content; NULL prompt_full rows (pre-migration) fall back to the
+        # truncated preview they still carry.
+        where.append(
+            "(job_id LIKE ? OR prompt_id LIKE ? OR workflow LIKE ? OR error LIKE ?"
+            " OR prompt_full LIKE ? OR prompt_preview LIKE ?)"
+        )
+        params.extend([like, like, like, like, like, like])
+    if has_outputs:
+        where.append("output_count > 0")
     _add_in_filter(where, params, "status", statuses)
     _add_in_filter(where, params, "kind", kinds)
     _add_in_filter(where, params, "platform", platforms)
@@ -371,6 +500,22 @@ def _task_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _output_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
+
+
+def _submission_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["params"] = _json_loads(item.pop("params_json"), {})
+    task_url = str(item.pop("task_url") or "")
+    item["status"] = str(item.pop("task_status") or "") or None
+    item["error"] = str(item.pop("task_error") or "") or None
+    if task_url:
+        item["result_url"] = task_url
+        primary_name = Path(task_url).name
+        item["media_type"] = guess_media_type(primary_name)
+    else:
+        item["result_url"] = None
+        item["media_type"] = None
+    return item
 
 
 def _json_loads(value: Any, default: Any) -> Any:

@@ -11,6 +11,8 @@ import {
   type InstanceRecord,
   type WorkflowListResponse
 } from "../lib/api";
+import { confirmDialog } from "./confirm";
+import { toast } from "./toast";
 
 export function InstancesPanel({
   items,
@@ -52,6 +54,7 @@ export function InstancesPanel({
       });
       setForm({ ...form, slug: "", display_name: "", auth_token: "" });
       onRefresh();
+      toast(`实例 ${form.slug.trim()} 已添加`, "ok");
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
@@ -104,6 +107,7 @@ export function InstancesPanel({
         return next;
       });
       onRefresh();
+      toast(`实例 ${slug} 已保存`, "ok");
     } catch (err) {
       setError(err instanceof Error ? err.message : "更新失败");
     } finally {
@@ -202,6 +206,11 @@ export function InstancesPanel({
                     <span>
                       {item.base_url} · {item.health} · in_flight {item.in_flight}/{item.max_in_flight}
                     </span>
+                    {item.last_error ? (
+                      <span className="instance-error" title={item.last_error}>
+                        {item.last_error}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="row-actions">
                     <button className="ghost-button" type="button" onClick={() => startEdit(item)}>
@@ -210,7 +219,12 @@ export function InstancesPanel({
                     <button
                       className="ghost-button"
                       type="button"
-                      onClick={() => void patchInstance(item.slug, { enabled: !item.enabled }).then(onRefresh)}
+                      onClick={() =>
+                        void patchInstance(item.slug, { enabled: !item.enabled })
+                          .then(onRefresh)
+                          .then(() => toast(`实例 ${item.slug} 已${item.enabled ? "停用" : "启用"}`, "ok"))
+                          .catch((err: unknown) => setError(err instanceof Error ? err.message : "更新失败"))
+                      }
                     >
                       {item.enabled ? "停用" : "启用"}
                     </button>
@@ -218,9 +232,17 @@ export function InstancesPanel({
                       className="ghost-button"
                       type="button"
                       onClick={() => {
-                        if (!window.confirm(`删除实例 ${item.slug}？将从 ${item.bound_model_count} 个模型解绑。`)) return;
-                        void deleteInstance(item.slug).then(onRefresh).catch((err: unknown) => {
-                          setError(err instanceof Error ? err.message : "删除失败");
+                        void confirmDialog({
+                          title: "删除实例",
+                          message: `删除实例 ${item.slug}？将从 ${item.bound_model_count} 个模型解绑。`,
+                          confirmLabel: "删除",
+                          danger: true
+                        }).then((ok) => {
+                          if (!ok) return;
+                          void deleteInstance(item.slug)
+                            .then(onRefresh)
+                            .then(() => toast(`实例 ${item.slug} 已删除`, "ok"))
+                            .catch((err: unknown) => setError(err instanceof Error ? err.message : "删除失败"));
                         });
                       }}
                     >
@@ -281,6 +303,7 @@ export function ModelsPanel({
       });
       setForm({ ...form, slug: "", display_name: "" });
       onRefresh();
+      toast(`模型 ${form.slug.trim()} 已创建（草稿，默认停用）`, "ok");
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {
@@ -470,6 +493,7 @@ export function ModelsPanel({
                       onClick={() =>
                         void patchModel(item.slug, { enabled: !item.enabled })
                           .then(onRefresh)
+                          .then(() => toast(`模型 ${item.slug} 已${item.enabled ? "停用" : "启用"}`, "ok"))
                           .catch((err: unknown) => setError(err instanceof Error ? err.message : "更新失败"))
                       }
                     >
@@ -479,10 +503,18 @@ export function ModelsPanel({
                       className="ghost-button"
                       type="button"
                       onClick={() => {
-                        if (!window.confirm(`删除模型 ${item.slug}？`)) return;
-                        void deleteModel(item.slug)
-                          .then(onRefresh)
-                          .catch((err: unknown) => setError(err instanceof Error ? err.message : "删除失败"));
+                        void confirmDialog({
+                          title: "删除模型",
+                          message: `删除模型 ${item.slug}？`,
+                          confirmLabel: "删除",
+                          danger: true
+                        }).then((ok) => {
+                          if (!ok) return;
+                          void deleteModel(item.slug)
+                            .then(onRefresh)
+                            .then(() => toast(`模型 ${item.slug} 已删除`, "ok"))
+                            .catch((err: unknown) => setError(err instanceof Error ? err.message : "删除失败"));
+                        });
                       }}
                     >
                       删除

@@ -1,9 +1,26 @@
 import type React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ImagePlus, KeyRound, LoaderCircle, Play } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Copy,
+  Dices,
+  Download,
+  FileCode2,
+  History,
+  ImagePlus,
+  KeyRound,
+  LoaderCircle,
+  Play,
+  RefreshCcw,
+  RotateCcw,
+  Trash2,
+  X
+} from "lucide-react";
+import {
+  addSubmission,
+  clearSubmissions,
   getPublicJob,
   listPublicModels,
+  listSubmissions,
   PublicAuthError,
   submitPlayground,
   type PlaygroundKind,
@@ -12,12 +29,16 @@ import {
   type PublicJobWsEvent,
   type PublicModel,
   type PublicVideo,
-  type TaskOutput
+  type SubmissionRecord,
+  type TaskOutput,
+  type TaskRecord
 } from "../lib/api";
 import { connectPublicJobSocket, type PublicJobSocket } from "../lib/websocket";
-import { clearApiToken, getApiToken, setApiToken } from "../lib/auth";
-import { asJson } from "../lib/format";
+import { clearApiToken, getAdminToken, getApiToken, setApiToken } from "../lib/auth";
+import { asJson, compactId, formatDateTime } from "../lib/format";
+import { MediaThumb } from "./media-thumb";
 import { kindLabels } from "./status-badge";
+import { copyText, toast } from "./toast";
 
 const modes: Array<{ kind: PlaygroundKind; label: string }> = [
   { kind: "txt2img", label: "文生图" },
@@ -52,11 +73,142 @@ const emptyFields = {
 
 type FieldState = typeof emptyFields;
 
-export function PlaygroundPanel(): React.ReactElement {
+const FORM_STORAGE_KEY = "comfyui2api.playground.form";
+
+export interface PlaygroundPrefill {
+  kind: PlaygroundKind;
+  fields: Partial<FieldState>;
+  hint?: string;
+}
+
+function restoreForm(): { kind: PlaygroundKind; fields: FieldState } {
+  try {
+    const raw = window.sessionStorage.getItem(FORM_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { kind?: PlaygroundKind; fields?: Partial<FieldState> };
+      return {
+        kind: parsed.kind ?? "txt2img",
+        fields: { ...emptyFields, ...parsed.fields }
+      };
+    }
+  } catch {
+    // corrupted snapshot falls back to the blank form
+  }
+  return { kind: "txt2img", fields: emptyFields };
+}
+
+function effectiveSeedOf(job: PublicJob | null): string | null {
+  const seed = (job?.request_json?.standard_params as Record<string, unknown> | undefined)?.seed;
+  if (seed === undefined || seed === null) return null;
+  return String(seed);
+}
+
+/** The request body as it actually ran: the submitted body with the backend's
+ * execution-effective params (randomized seed etc.) folded in, so "copy
+ * params" reproduces the result instead of re-rolling. */
+function effectiveRequestBody(trace: PlaygroundRequestTrace | null, job: PublicJob | null): Record<string, unknown> {
+  const body = { ...((trace?.body as Record<string, unknown> | undefined) ?? {}) };
+  const effective = (job?.request_json?.standard_params as Record<string, unknown> | undefined) ?? {};
+  for (const [key, value] of Object.entries(effective)) {
+    if (key === "seed" || !(key in body)) body[key] = value;
+  }
+  return body;
+}
+
+/** Display prompt of a stored task, preferring the untruncated copy. */
+export function taskPromptText(task: TaskRecord): string {
+  if (task.prompt_full) return task.prompt_full;
+  const requestPrompt = task.request_json?.prompt;
+  if (typeof requestPrompt === "string" && requestPrompt) return requestPrompt;
+  return task.prompt_preview ?? "";
+}
+
+/** Display negative prompt of a stored task, same fallback order. */
+export function taskNegativeText(task: TaskRecord): string {
+  if (task.negative_prompt_full) return task.negative_prompt_full;
+  const requestNegative = task.request_json?.negative_prompt;
+  if (typeof requestNegative === "string" && requestNegative) return requestNegative;
+  return "";
+}
+
+/** Rebuild playground form fields from a stored task so the drawer's 「在试
+ * 运行中重跑」recreates the exact request. Reference images cannot be
+ * restored (the staged input is not re-selectable from the browser), so the
+ * image fields stay empty. */
+export function buildPrefillFromTask(task: TaskRecord): PlaygroundPrefill {
+  const requestJson = task.request_json ?? {};
+  const standardParams = (requestJson.standard_params as Record<string, unknown> | undefined) ?? {};
+  const kind = (["txt2img", "img2img", "txt2video", "img2video", "txt2audio"] as const).includes(task.kind as PlaygroundKind)
+    ? (task.kind as PlaygroundKind)
+    : "txt2img";
+
+  const pick = (key: keyof typeof standardParams): string => {
+    const value = standardParams[key];
+    if (value === undefined || value === null || typeof value === "object") return "";
+    return String(value);
+  };
+
+  const topLevel = (key: string): string => {
+    const value = requestJson[key];
+    if (value === undefined || value === null || typeof value === "object") return "";
+    return String(value);
+  };
+
+  const fields: Record<string, string> = {
+    model: task.model_slug ?? task.requested_model ?? "",
+    prompt: taskPromptText(task),
+    negative_prompt: taskNegativeText(task),
+    size: topLevel("size") || pick("size"),
+    width: pick("width"),
+    height: pick("height"),
+    steps: pick("steps"),
+    cfg: pick("cfg"),
+    seed: pick("seed"),
+    response_format: pick("response_format") || "url",
+    seconds: topLevel("seconds") || pick("seconds"),
+    duration: pick("duration"),
+    fps: pick("fps"),
+    frames: pick("frames"),
+    quality: topLevel("quality") || pick("quality"),
+    metadata: topLevel("metadata"),
+    voice: pick("voice"),
+    speed: pick("speed"),
+    imageUrl: "",
+    n: pick("n")
+  };
+  return {
+    kind,
+    fields,
+    hint: task.kind === "img2img" || task.kind === "img2video" ? "参数已载入：原参考图不可复用，请重新上传" : undefined
+  };
+}
+
+function toCurl(trace: PlaygroundRequestTrace, body: Record<string, unknown>): string {
+  const parts = [`curl -X ${trace.method} '${window.location.origin}${trace.path}'`];
+  for (const [key, value] of Object.entries(trace.headers)) {
+    const resolved = value === "Bearer ***" ? "Bearer $API_TOKEN" : value;
+    parts.push(`-H '${key}: ${resolved}'`);
+  }
+  if (body && Object.keys(body).length > 0) {
+    parts.push(`--data '${JSON.stringify(body).replace(/'/g, "'\\''")}'`);
+  }
+  return parts.join(" \\\n  ");
+}
+
+export function PlaygroundPanel({
+  prefill,
+  onPrefillConsumed,
+  onOpenTask
+}: {
+  prefill?: PlaygroundPrefill | null;
+  onPrefillConsumed?: () => void;
+  onOpenTask?: (jobId: string) => void;
+}): React.ReactElement {
+  const restored = useMemo(restoreForm, []);
   const [apiTokenNeeded, setApiTokenNeeded] = useState(() => !getApiToken());
   const [tokenInput, setTokenInput] = useState("");
-  const [kind, setKind] = useState<PlaygroundKind>("txt2img");
-  const [fields, setFields] = useState<FieldState>(emptyFields);
+  const [kind, setKind] = useState<PlaygroundKind>(restored.kind);
+  const [fields, setFields] = useState<FieldState>(restored.fields);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [models, setModels] = useState<PublicModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -67,11 +219,37 @@ export function PlaygroundPanel(): React.ReactElement {
   const [job, setJob] = useState<PublicJob | null>(null);
   const [video, setVideo] = useState<PublicVideo | null>(null);
   const [submittedMeta, setSubmittedMeta] = useState<{ modelName: string; modelSlug: string } | null>(null);
+  const [activeOutputIdx, setActiveOutputIdx] = useState(0);
+  const [history, setHistory] = useState<SubmissionRecord[]>([]);
+  // Result of a history card being viewed while no live job claims the stage.
+  const [historyPreview, setHistoryPreview] = useState<SubmissionRecord | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [showTrace, setShowTrace] = useState(false);
+
+  // Mirror of `fields` so re-roll/reproduce can merge overrides and submit in
+  // one tick without racing the render cycle.
+  const fieldsRef = useRef(fields);
+  fieldsRef.current = fields;
 
   const needsImage = kind === "img2img" || kind === "img2video";
   const isVideo = kind === "txt2video" || kind === "img2video";
   const isAudio = kind === "txt2audio";
+
+  useEffect(() => {
+    window.sessionStorage.setItem(FORM_STORAGE_KEY, JSON.stringify({ kind, fields }));
+  }, [kind, fields]);
+
+  useEffect(() => {
+    if (!prefill) return;
+    setKind(prefill.kind);
+    setFields({ ...emptyFields, ...prefill.fields });
+    setImageFile(null);
+    setActiveOutputIdx(0);
+    setHistoryPreview(null);
+    if (prefill.hint) toast(prefill.hint, "info");
+    onPrefillConsumed?.();
+  }, [prefill, onPrefillConsumed]);
 
   const filteredModels = useMemo(
     () => models.filter((item) => (item.kind || []).includes(kind)),
@@ -119,6 +297,23 @@ export function PlaygroundPanel(): React.ReactElement {
     setFields((current) => ({ ...current, model: "" }));
   }, [fields.model, filteredModels]);
 
+  const loadHistory = useCallback(async () => {
+    if (!getAdminToken()) return;
+    setHistoryLoading(true);
+    try {
+      const payload = await listSubmissions(30);
+      setHistory(payload.items);
+    } catch {
+      // history is a convenience; a failure here should not nag the operator
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (historyOpen) void loadHistory();
+  }, [historyOpen, loadHistory]);
+
   // Live status for a submitted job/video. Use the push-based per-job WebSocket
   // (one event per actual state change) instead of polling HTTP every 1.5s for
   // the whole generation. If WS is unavailable/fails repeatedly, fall back to
@@ -148,9 +343,11 @@ export function PlaygroundPanel(): React.ReactElement {
           setJob((current) =>
             current ? { ...current, status: "completed", url, outputs } : current
           );
+          if (outputs.length > 0) setActiveOutputIdx(0);
           if (isVideoLive && url) {
             setVideo((current) => (current ? { ...current, status: "completed", url } : current));
           }
+          void loadHistory();
           break;
         }
         case "job_progress": {
@@ -184,6 +381,23 @@ export function PlaygroundPanel(): React.ReactElement {
           if (isVideoLive) {
             setVideo((current) => (current ? { ...current, status: "failed", error: { message: entry.data.error ?? "" } } : current));
           }
+          void loadHistory();
+          break;
+        case "job_params_effective":
+          // The backend randomized the seed (and/or derived params) right
+          // before queueing; fold them in so the seed chip and 锁 seed 复现
+          // reflect what actually ran, without waiting for a snapshot.
+          setJob((current) =>
+            current
+              ? {
+                  ...current,
+                  request_json: {
+                    ...(current.request_json ?? {}),
+                    standard_params: entry.data.standard_params ?? {}
+                  }
+                }
+              : current
+          );
           break;
         case "error":
           setError(entry.data.message ?? "任务查询失败");
@@ -251,12 +465,11 @@ export function PlaygroundPanel(): React.ReactElement {
       window.clearInterval(pollTimer);
       socket?.close();
     };
-  }, [job?.job_id, job?.status, video?.status]);
+  }, [job?.job_id, job?.status, video?.status, loadHistory]);
 
-  async function handleSubmit(event: React.FormEvent): Promise<void> {
-    event.preventDefault();
-    const prompt = fields.prompt.trim();
-    if (!fields.model) {
+  async function doSubmit(source: FieldState): Promise<void> {
+    const prompt = source.prompt.trim();
+    if (!source.model) {
       setError("请选择模型");
       return;
     }
@@ -264,7 +477,7 @@ export function PlaygroundPanel(): React.ReactElement {
       setError("请填写 prompt");
       return;
     }
-    if (needsImage && !imageFile && !fields.imageUrl.trim()) {
+    if (needsImage && !imageFile && !source.imageUrl.trim()) {
       setError("请上传参考图或填写图片 URL");
       return;
     }
@@ -276,19 +489,31 @@ export function PlaygroundPanel(): React.ReactElement {
     setError("");
     setJob(null);
     setVideo(null);
+    setActiveOutputIdx(0);
+    setHistoryPreview(null);
     // Snapshot which model this submission targets so the result meta row stays
     // truthful even if the picker changes mid-run.
-    setSubmittedMeta({ modelName: selected?.display_name || fields.model, modelSlug: fields.model });
+    setSubmittedMeta({ modelName: selected?.display_name || source.model, modelSlug: source.model });
     try {
       const result = await submitPlayground(kind, {
-        ...fields,
+        ...source,
         imageFile: needsImage ? imageFile : null,
-        imageUrl: needsImage ? fields.imageUrl : ""
+        imageUrl: needsImage ? source.imageUrl : ""
       });
       setRequestTrace(result.request);
       setRawResponse(result.response);
       if (result.jobId) {
         setJob({ job_id: result.jobId, status: "pending", progress_percent: 0 });
+        // Record the submission for the reusable history. Best-effort: a
+        // failed write must never block or fail the generation itself.
+        void addSubmission({
+          kind,
+          model: source.model,
+          params: (result.request.body as Record<string, unknown>) ?? {},
+          job_id: result.jobId
+        })
+          .then(() => loadHistory())
+          .catch(() => undefined);
       }
       if (result.videoId) {
         setVideo({ id: result.videoId, object: "video", status: "queued", progress: 0 });
@@ -304,6 +529,62 @@ export function PlaygroundPanel(): React.ReactElement {
       setSubmitting(false);
     }
   }
+
+  /** Submit with the current form values, optionally overriding fields (used by
+   * the re-roll / reproduce actions so the click and the submit are atomic). */
+  async function runSubmission(overrides?: Partial<FieldState>): Promise<void> {
+    const source = { ...fieldsRef.current, ...overrides };
+    setFields(source);
+    await doSubmit(source);
+  }
+
+  async function handleSubmit(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
+    await runSubmission();
+  }
+
+  function applySubmission(record: SubmissionRecord): void {
+    if (busy) {
+      toast("当前任务运行中，结束后再载入历史参数", "info");
+      return;
+    }
+    const params = record.params ?? {};
+    const next: FieldState = { ...emptyFields };
+    for (const key of Object.keys(emptyFields) as Array<keyof FieldState>) {
+      const value = params[key];
+      if (typeof value === "string" || typeof value === "number") next[key] = String(value);
+    }
+    if (typeof params.image === "string" && /^https?:\/\//.test(params.image)) {
+      next.imageUrl = params.image;
+    }
+    const recordKind = modes.some((mode) => mode.kind === record.kind) ? (record.kind as PlaygroundKind) : kind;
+    setKind(recordKind);
+    setFields(next);
+    setImageFile(null);
+    setHistoryPreview(record);
+    toast("已载入历史参数并回看结果，可修改后重新生成", "ok");
+  }
+
+  async function handleClearHistory(): Promise<void> {
+    try {
+      await clearSubmissions();
+      setHistory([]);
+      toast("提交历史已清空", "ok");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "清空失败", "error");
+    }
+  }
+
+  const previewUrl = job?.url || job?.outputs?.[activeOutputIdx]?.url || video?.url || historyPreview?.result_url || "";
+  const previewingHistory = !job?.url && !job?.outputs?.length && !video?.url && Boolean(historyPreview?.result_url);
+  const progress = isVideo ? video?.progress ?? 0 : job?.progress_percent ?? 0;
+  const statusText = isVideo ? video?.status ?? "" : job?.status ?? "";
+  const failedMessage = job?.error || video?.error?.message || "";
+  const busy = submitting || statusText === "pending" || statusText === "queued" || statusText === "running" || statusText === "in_progress";
+  const effectiveSeed = effectiveSeedOf(job);
+  const outputs = job?.outputs ?? [];
+
+  const imageObjectUrl = useImageObjectUrl(imageFile);
 
   if (apiTokenNeeded) {
     return (
@@ -342,12 +623,6 @@ export function PlaygroundPanel(): React.ReactElement {
       </section>
     );
   }
-
-  const previewUrl = job?.url || job?.outputs?.[0]?.url || video?.url || "";
-  const progress = isVideo ? video?.progress ?? 0 : job?.progress_percent ?? 0;
-  const statusText = isVideo ? video?.status ?? "" : job?.status ?? "";
-  const failedMessage = job?.error || video?.error?.message || "";
-  const busy = submitting || statusText === "pending" || statusText === "queued" || statusText === "running" || statusText === "in_progress";
 
   return (
     <section className="view-panel playground-panel">
@@ -395,7 +670,7 @@ export function PlaygroundPanel(): React.ReactElement {
             <select value={fields.model} onChange={(event) => setField("model", event.target.value)} required>
               <option value="">{modelsLoading ? "加载中…" : "选择公开模型"}</option>
               {filteredModels.map((item) => (
-                <option key={item.id} value={item.id}>
+                <option key={item.id} value={item.id} disabled={!item.ready}>
                   {item.display_name || item.id}
                   {item.ready ? "" : "（未就绪）"}
                 </option>
@@ -436,7 +711,12 @@ export function PlaygroundPanel(): React.ReactElement {
               </label>
               <label className="playground-field">
                 <span>speed</span>
-                <input value={fields.speed} onChange={(event) => setField("speed", event.target.value)} placeholder="可选，如 1.0" />
+                <input
+                  value={fields.speed}
+                  onChange={(event) => setField("speed", event.target.value)}
+                  placeholder="可选，如 1.0"
+                  inputMode="decimal"
+                />
               </label>
             </>
           ) : null}
@@ -444,6 +724,19 @@ export function PlaygroundPanel(): React.ReactElement {
             <div className="playground-field span-all">
               <span>参考图（文件优先，否则 URL）</span>
               <div className="playground-image">
+                {imageObjectUrl ? (
+                  <div className="ref-image-chip">
+                    <img src={imageObjectUrl} alt="参考图预览" />
+                    <button
+                      className="icon-button"
+                      type="button"
+                      title="移除参考图"
+                      onClick={() => setImageFile(null)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : null}
                 <label className="file-drop">
                   <ImagePlus size={14} />
                   <input
@@ -469,31 +762,56 @@ export function PlaygroundPanel(): React.ReactElement {
               </label>
               <label className="playground-field">
                 <span>width</span>
-                <input value={fields.width} onChange={(event) => setField("width", event.target.value)} placeholder="可选" />
+                <input
+                  value={fields.width}
+                  onChange={(event) => setField("width", event.target.value)}
+                  placeholder="可选"
+                  inputMode="numeric"
+                />
               </label>
               <label className="playground-field">
                 <span>height</span>
-                <input value={fields.height} onChange={(event) => setField("height", event.target.value)} placeholder="可选" />
+                <input
+                  value={fields.height}
+                  onChange={(event) => setField("height", event.target.value)}
+                  placeholder="可选"
+                  inputMode="numeric"
+                />
               </label>
             </>
           ) : null}
           {!isVideo && !isAudio ? (
             <label className="playground-field">
               <span>n</span>
-              <input value={fields.n} onChange={(event) => setField("n", event.target.value)} placeholder="1" />
+              <input value={fields.n} onChange={(event) => setField("n", event.target.value)} placeholder="1" inputMode="numeric" />
             </label>
           ) : null}
           <label className="playground-field">
             <span>steps</span>
-            <input value={fields.steps} onChange={(event) => setField("steps", event.target.value)} />
+            <input value={fields.steps} onChange={(event) => setField("steps", event.target.value)} inputMode="numeric" />
           </label>
           <label className="playground-field">
             <span>cfg</span>
-            <input value={fields.cfg} onChange={(event) => setField("cfg", event.target.value)} />
+            <input value={fields.cfg} onChange={(event) => setField("cfg", event.target.value)} inputMode="decimal" />
           </label>
           <label className="playground-field">
             <span>seed</span>
-            <input value={fields.seed} onChange={(event) => setField("seed", event.target.value)} />
+            <div className="seed-input">
+              <input
+                value={fields.seed}
+                onChange={(event) => setField("seed", event.target.value)}
+                placeholder="留空随机"
+                inputMode="numeric"
+              />
+              <button
+                className="icon-button"
+                type="button"
+                title="随机 seed"
+                onClick={() => setField("seed", String(Math.floor(Math.random() * 2 ** 32)))}
+              >
+                <Dices size={15} />
+              </button>
+            </div>
           </label>
           {!isVideo ? (
             <label className="playground-field">
@@ -507,19 +825,24 @@ export function PlaygroundPanel(): React.ReactElement {
             <>
               <label className="playground-field">
                 <span>seconds</span>
-                <input value={fields.seconds} onChange={(event) => setField("seconds", event.target.value)} placeholder="duration 别名" />
+                <input
+                  value={fields.seconds}
+                  onChange={(event) => setField("seconds", event.target.value)}
+                  placeholder="duration 别名"
+                  inputMode="decimal"
+                />
               </label>
               <label className="playground-field">
                 <span>duration</span>
-                <input value={fields.duration} onChange={(event) => setField("duration", event.target.value)} />
+                <input value={fields.duration} onChange={(event) => setField("duration", event.target.value)} inputMode="decimal" />
               </label>
               <label className="playground-field">
                 <span>fps</span>
-                <input value={fields.fps} onChange={(event) => setField("fps", event.target.value)} />
+                <input value={fields.fps} onChange={(event) => setField("fps", event.target.value)} inputMode="numeric" />
               </label>
               <label className="playground-field">
                 <span>frames</span>
-                <input value={fields.frames} onChange={(event) => setField("frames", event.target.value)} />
+                <input value={fields.frames} onChange={(event) => setField("frames", event.target.value)} inputMode="numeric" />
               </label>
               <label className="playground-field">
                 <span>quality</span>
@@ -551,6 +874,18 @@ export function PlaygroundPanel(): React.ReactElement {
                 <em>实例</em>
                 <strong title={job?.instance_slug ?? ""}>{job?.instance_slug?.trim() || "等待分配…"}</strong>
               </span>
+              {effectiveSeed ? (
+                <span>
+                  <em>生效 seed</em>
+                  <strong title="实际用于本次生成的 seed">{effectiveSeed}</strong>
+                </span>
+              ) : null}
+              {job?.current_node ? (
+                <span>
+                  <em>节点</em>
+                  <strong title={job.current_node}>{compactId(job.current_node, 18)}</strong>
+                </span>
+              ) : null}
             </div>
           ) : null}
           <div className="preview-stage playground-preview">
@@ -570,7 +905,23 @@ export function PlaygroundPanel(): React.ReactElement {
             ) : (
               <div className="empty-preview">提交后在此预览</div>
             )}
+            {previewingHistory ? <span className="history-preview-note">正在回看历史提交结果</span> : null}
           </div>
+          {outputs.length > 1 ? (
+            <div className="output-thumb-strip">
+              {outputs.map((output, index) => (
+                <button
+                  type="button"
+                  key={`${output.filename}-${index}`}
+                  className={index === activeOutputIdx ? "active" : ""}
+                  onClick={() => setActiveOutputIdx(index)}
+                  title={output.filename}
+                >
+                  <MediaThumb url={output.url} mediaType={output.media_type} />
+                </button>
+              ))}
+            </div>
+          ) : null}
           {job || video ? (
             <div className="progress-cell playground-progress">
               <div className="progress-track">
@@ -580,6 +931,102 @@ export function PlaygroundPanel(): React.ReactElement {
             </div>
           ) : null}
           {failedMessage ? <div className="error-banner">{failedMessage}</div> : null}
+          {job ? (
+            <div className="playground-quick-actions">
+              <button className="ghost-button" type="button" disabled={busy} onClick={() => void runSubmission({ seed: "" })} title="清空 seed 重新随机生成">
+                <RefreshCcw size={15} />
+                再来一张
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={busy || !effectiveSeed}
+                onClick={() => void runSubmission({ seed: effectiveSeed ?? "" })}
+                title={`锁定生效 seed ${effectiveSeed ?? ""} 重新生成`}
+              >
+                <RotateCcw size={15} />
+                锁 seed 复现
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!requestTrace}
+                onClick={() => {
+                  if (!requestTrace) return;
+                  void copyText(JSON.stringify(effectiveRequestBody(requestTrace, job), null, 2), "请求参数已复制（含生效 seed）");
+                }}
+              >
+                <Copy size={15} />
+                复制参数
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!requestTrace}
+                onClick={() => {
+                  if (!requestTrace) return;
+                  void copyText(toCurl(requestTrace, effectiveRequestBody(requestTrace, job)), "cURL 命令已复制（token 用 $API_TOKEN 占位）");
+                }}
+              >
+                <FileCode2 size={15} />
+                复制 cURL
+              </button>
+              {onOpenTask ? (
+                <button className="ghost-button" type="button" onClick={() => onOpenTask(job!.job_id)}>
+                  <History size={15} />
+                  查看任务详情
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="playground-history">
+            <button className="history-toggle" type="button" onClick={() => setHistoryOpen((value) => !value)}>
+              <History size={15} />
+              提交历史{history.length > 0 ? `（${history.length}）` : ""}
+              <span className="history-toggle-hint">点击卡片载入参数并回看结果</span>
+            </button>
+            {historyOpen ? (
+              <>
+                <div className="history-actions">
+                  <button className="icon-button" type="button" title="刷新历史" onClick={() => void loadHistory()} disabled={historyLoading}>
+                    <RefreshCcw size={14} />
+                  </button>
+                  <button className="icon-button" type="button" title="清空历史" onClick={() => void handleClearHistory()} disabled={history.length === 0}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <div className="history-grid">
+                  {history.map((record) => (
+                    <button
+                      type="button"
+                      className={`history-card${record.status === "failed" ? " is-error" : ""}`}
+                      key={record.id}
+                      onClick={() => applySubmission(record)}
+                      title={`${record.model ?? record.kind} · ${formatDateTime(record.created_at_utc, true)}`}
+                    >
+                      <span className="history-thumb">
+                        <MediaThumb
+                          url={record.result_url ?? ""}
+                          mediaType={record.media_type}
+                          fallback={<Download size={16} />}
+                        />
+                      </span>
+                      <span className="history-line">
+                        <strong>{record.model || record.kind}</strong>
+                        <em>{statusLabelOf(record.status)}</em>
+                      </span>
+                      <span className="history-line muted">
+                        {kindLabels[record.kind] ?? record.kind} · {formatDateTime(record.created_at_utc, true)}
+                      </span>
+                      <span className="history-line clamp2">{promptOf(record)}</span>
+                    </button>
+                  ))}
+                  {!historyLoading && history.length === 0 ? <span className="muted">暂无提交历史</span> : null}
+                  {historyLoading ? <span className="muted">加载中…</span> : null}
+                </div>
+              </>
+            ) : null}
+          </div>
           <button className="ghost-button" type="button" onClick={() => setShowTrace((value) => !value)}>
             {showTrace ? "收起请求对照" : "查看请求对照"}
           </button>
@@ -593,6 +1040,32 @@ export function PlaygroundPanel(): React.ReactElement {
       </div>
     </section>
   );
+}
+
+/** Local object URL for the chosen reference image, revoked on change/unmount. */
+function useImageObjectUrl(file: File | null): string {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (!file) {
+      setUrl("");
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+  return url;
+}
+
+function statusLabelOf(status?: string | null): string {
+  if (!status) return "已过期";
+  const labels: Record<string, string> = { pending: "等待", queued: "排队中", running: "运行中", completed: "成功", failed: "失败" };
+  return labels[status] ?? status;
+}
+
+function promptOf(record: SubmissionRecord): string {
+  const prompt = record.params?.prompt;
+  return typeof prompt === "string" && prompt ? prompt : "(无 prompt)";
 }
 
 function looksVideo(url: string): boolean {
