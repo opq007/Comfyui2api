@@ -305,6 +305,25 @@ def _mapping_getlist(values: Any, name: str) -> list[Any]:
     return [raw]
 
 
+def _edit_image_url_value(item: Any) -> str | None:
+    """Best-effort image reference from a JSON value.
+
+    Accepts a URL/base64 string or an OpenAI-style ``{"url": ...}`` /
+    ``{"image_url": ...}`` object; anything else is unusable and yields
+    None instead of being stringified into a garbage reference.
+    """
+    if isinstance(item, str):
+        cleaned = item.strip()
+        return cleaned or None
+    if isinstance(item, dict):
+        raw = item.get("url")
+        if raw is None:
+            raw = item.get("image_url")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
 def _is_empty_edit_image_item(item: Any) -> bool:
     if item is None:
         return True
@@ -328,6 +347,9 @@ def _is_edit_image_field_name(name: str) -> bool:
 def _edit_image_item_marker(item: Any) -> Any:
     if isinstance(item, (str, bytes, int, float, bool)):
         return ("v", item)
+    if isinstance(item, dict):
+        # Structurally equal URL objects ({"url": ...}) name the same image.
+        return ("v", _edit_image_url_value(item) or json.dumps(item, sort_keys=True, ensure_ascii=False, default=str))
     return ("id", id(item))
 
 
@@ -369,9 +391,14 @@ def _collect_named_edit_image_items(values: Any) -> list[Any]:
     numbered: list[tuple[int, Any]] = []
     pairs = _iter_mapping_pairs(values)
     if pairs:
-        for name, value in pairs:
-            if name in _EDIT_IMAGE_FIELD_NAMES:
-                canonical.append(value)
+        # Wire formats don't guarantee key order, so canonical fields are
+        # ranked by field priority (`image` before `images`/`input_reference`)
+        # while same-name repeats keep their encounter order (stable sort).
+        priority = {name: rank for rank, name in enumerate(_EDIT_IMAGE_FIELD_NAMES)}
+        ranked: list[tuple[int, int, Any]] = []
+        for seq, (name, value) in enumerate(pairs):
+            if name in priority:
+                ranked.append((priority[name], seq, value))
                 continue
             indexed_match = _EDIT_INDEXED_IMAGE_RE.match(name)
             if indexed_match:
@@ -382,6 +409,8 @@ def _collect_named_edit_image_items(values: Any) -> list[Any]:
                 index = int(numbered_match.group(1))
                 if index >= 1:
                     numbered.append((index, value))
+        ranked.sort(key=lambda entry: entry[0])
+        canonical = [value for _, _, value in ranked]
     else:
         for name in _EDIT_IMAGE_FIELD_NAMES:
             canonical.extend(_mapping_getlist(values, name))
@@ -404,18 +433,16 @@ def _collect_named_edit_image_items(values: Any) -> list[Any]:
     return canonical + [value for _, value in indexed] + [value for _, value in numbered]
 
 
-def collect_edit_image_items(*, values: Any, is_form: bool) -> list[Any]:
-    if is_form:
-        items = _collect_named_edit_image_items(values)
-    else:
-        items = []
-        if values is not None and hasattr(values, "get"):
-            for key in ("images", "input_references"):
-                raw = values.get(key)
-                if raw is None:
-                    continue
-                items.extend(list(raw) if isinstance(raw, list) else [raw])
-        items.extend(_collect_named_edit_image_items(values))
+def collect_edit_image_items(*, values: Any) -> list[Any]:
+    """Ordered edit-image references from either wire format (JSON or form).
+
+    Canonical fields (`image`, `input_reference`) always take the earliest
+    slots, then `images`/`input_references` arrays, then indexed/numbered
+    fields — so `image` is the first frame even when a client also sends an
+    `images` array. Items are selected and deduped here; normalization of
+    ``{"url": ...}`` objects to URL strings happens at store time.
+    """
+    items = _collect_named_edit_image_items(values)
     return [item for item in _dedupe_edit_image_items(items) if not _is_empty_edit_image_item(item)]
 
 
@@ -424,6 +451,31 @@ def extra_edit_image_params(image_rels: list[str]) -> dict[str, Any]:
     for index, rel in enumerate(image_rels[1:], start=2):
         extras[f"image{index}"] = rel
     return extras
+
+
+def _workflow_spec_parameters(wf: Any) -> dict[str, Any]:
+    return getattr(getattr(wf, "parameter_spec", None), "parameters", None) or {}
+
+
+def _apply_multi_image_params(
+    standard_params: dict[str, Any],
+    wf: Any,
+    image_rels: list[str],
+    *,
+    include_single: bool,
+) -> None:
+    """Stamp ordered reference images + count onto the job's standard params.
+
+    Endpoints that always described single-image requests with inputImgCount
+    pass include_single=True. Chat and the newAPI video endpoint keep a
+    single-image payload shape-stable (JobManager derives the count at run
+    time) and only stamp when there are 2+ images — or when the sidecar
+    declares inputImgCount, since AIO workflows pick their branch from it.
+    """
+    spec_parameters = _workflow_spec_parameters(wf)
+    gate = bool(image_rels) if include_single else len(image_rels) > 1
+    if gate or "inputImgCount" in spec_parameters:
+        standard_params.update(extra_edit_image_params(image_rels))
 
 
 def create_app() -> FastAPI:
@@ -824,16 +876,16 @@ def create_app() -> FastAPI:
             return "b64_json"
         return "url"
 
-    def _extract_chat_message_content(content: Any) -> tuple[list[str], str | None]:
+    def _extract_chat_message_content(content: Any) -> tuple[list[str], list[str]]:
         texts: list[str] = []
-        image_value: str | None = None
+        images: list[str] = []
         if isinstance(content, str):
             cleaned = content.strip()
             if cleaned:
                 texts.append(cleaned)
-            return texts, None
+            return texts, images
         if not isinstance(content, list):
-            return texts, None
+            return texts, images
 
         for part in content:
             if isinstance(part, str):
@@ -854,8 +906,6 @@ def create_app() -> FastAPI:
                     texts.append(cleaned)
                 continue
 
-            if image_value is not None:
-                continue
             if part_type not in {"image_url", "input_image", "image"}:
                 continue
 
@@ -870,15 +920,15 @@ def create_app() -> FastAPI:
                 raw_image = raw_image.get("url") or raw_image.get("image_url")
             cleaned_image = str(raw_image or "").strip()
             if cleaned_image:
-                image_value = cleaned_image
+                images.append(cleaned_image)
 
-        return texts, image_value
+        return texts, images
 
-    def _extract_chat_prompt_and_image(messages: Any) -> tuple[str, str | None]:
+    def _extract_chat_prompt_and_images(messages: Any) -> tuple[str, list[str]]:
         prompt = ""
-        image_value: str | None = None
+        images: list[str] = []
         if not isinstance(messages, list):
-            return prompt, image_value
+            return prompt, images
 
         for item in reversed(messages):
             if not isinstance(item, dict):
@@ -886,15 +936,17 @@ def create_app() -> FastAPI:
             role = str(item.get("role") or "").strip().lower()
             if role != "user":
                 continue
-            texts, maybe_image = _extract_chat_message_content(item.get("content"))
+            texts, maybe_images = _extract_chat_message_content(item.get("content"))
             if not prompt and texts:
                 prompt = "\n\n".join(texts).strip()
-            if image_value is None and maybe_image:
-                image_value = maybe_image
-            if prompt and image_value is not None:
+            # Multi-image edits order their references, so take every image
+            # from the latest message that carries any instead of just one.
+            if not images and maybe_images:
+                images = list(maybe_images)
+            if prompt and images:
                 break
 
-        return prompt, image_value
+        return prompt, images
 
     def _chat_completion_response(*, model: str, content_payload: Mapping[str, Any]) -> Dict[str, Any]:
         return {
@@ -936,22 +988,29 @@ def create_app() -> FastAPI:
             raise _openai_error("Missing 'model'", error_code="model_not_found", http_status=404)
 
         prompt = str(body.get("prompt") or "").strip()
-        image_value = _clean_optional_value(body.get("image"))
-        if image_value is not None:
-            image_value = str(image_value).strip()
-        if not prompt or not image_value:
-            message_prompt, message_image = _extract_chat_prompt_and_image(body.get("messages"))
+        image_values: list[str] = []
+        raw_image = body.get("image")
+        if isinstance(raw_image, list):
+            image_values.extend(
+                value for value in (_edit_image_url_value(item) for item in raw_image) if value
+            )
+        else:
+            image_value = _edit_image_url_value(raw_image)
+            if image_value:
+                image_values.append(image_value)
+        if not prompt or not image_values:
+            message_prompt, message_images = _extract_chat_prompt_and_images(body.get("messages"))
             if not prompt:
                 prompt = message_prompt
-            if not image_value and message_image:
-                image_value = message_image
+            if not image_values:
+                image_values = message_images
         if not prompt:
             raise _openai_error("Missing prompt text in 'messages'")
 
         resolved = await _resolve_public_model(
             model=requested_model,
             kind=str(body.get("kind") or "").strip() or None,
-            has_image=bool(image_value),
+            has_image=bool(image_values),
         )
         wf = resolved.workflow
         kind = resolved.kind
@@ -961,9 +1020,13 @@ def create_app() -> FastAPI:
         if seconds_value is not None and "duration" not in standard_params:
             standard_params["duration"] = seconds_value
 
-        image_rel = ""
-        if image_value:
-            image_rel = await _store_input_image_value(str(image_value), filename_hint="chat_input")
+        image_rels: list[str] = []
+        for index, image_value in enumerate(image_values, start=1):
+            stored = await _store_input_image_value(str(image_value), filename_hint=f"chat_input{index}")
+            if stored:
+                image_rels.append(stored)
+        image_rel = image_rels[0] if image_rels else ""
+        _apply_multi_image_params(standard_params, wf, image_rels, include_single=False)
 
         job = await jobs.create_job(
             kind=kind,
@@ -1032,7 +1095,7 @@ def create_app() -> FastAPI:
         if str(body.get("workflow") or "").strip():
             raise _openai_error("Use 'model' (external model id); 'workflow' is not a routing key", http_status=400)
         kind = str(body.get("kind") or "").strip() or None
-        image_items = collect_edit_image_items(values=body, is_form=False)
+        image_items = collect_edit_image_items(values=body)
         has_image = bool(image_items or body.get("image_base64"))
         resolved = await _resolve_public_model(model=requested_model, kind=kind, has_image=has_image)
         wf = resolved.workflow
@@ -1099,9 +1162,7 @@ def create_app() -> FastAPI:
                 },
             )
         )
-        spec_parameters = getattr(getattr(wf, "parameter_spec", None), "parameters", None) or {}
-        if image_rels or "inputImgCount" in spec_parameters:
-            standard_params.update(extra_edit_image_params(image_rels))
+        _apply_multi_image_params(standard_params, wf, image_rels, include_single=True)
 
         job = await jobs.create_job(
             kind=kind,
@@ -1268,7 +1329,7 @@ def create_app() -> FastAPI:
                 "model": str(body.get("model") or body.get("workflow") or "").strip(),
                 "negative_prompt": str(body.get("negative_prompt") or "").strip(),
                 "response_format": body.get("response_format"),
-                "image_items": collect_edit_image_items(values=body, is_form=False),
+                "image_items": collect_edit_image_items(values=body),
                 "raw_values": body,
             }
 
@@ -1278,7 +1339,7 @@ def create_app() -> FastAPI:
             "model": str(form.get("model") or form.get("workflow") or "").strip(),
             "negative_prompt": str(form.get("negative_prompt") or "").strip(),
             "response_format": form.get("response_format"),
-            "image_items": collect_edit_image_items(values=form, is_form=True),
+            "image_items": collect_edit_image_items(values=form),
             "raw_values": form,
         }
 
@@ -1289,10 +1350,10 @@ def create_app() -> FastAPI:
                 return None
             hint = getattr(item, "filename", None) or filename_hint
             return await _store_input_image_bytes(data=data, filename_hint=hint)
-        cleaned = _clean_optional_value(item)
-        if cleaned is None:
+        value = _edit_image_url_value(item)
+        if value is None:
             return None
-        return await _store_input_image_value(str(cleaned), filename_hint=filename_hint)
+        return await _store_input_image_value(value, filename_hint=filename_hint)
 
     @app.post("/v1/images/edits")
     async def openai_images_edits(
@@ -1492,7 +1553,7 @@ def create_app() -> FastAPI:
     ) -> Any:
         _require_auth(cfg, authorization)
         form = await request.form()
-        image_items = collect_edit_image_items(values=form, is_form=True)
+        image_items = collect_edit_image_items(values=form)
         if not image_items and image is not None:
             image_items = [image]
         resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2video", has_image=True)
@@ -1604,7 +1665,7 @@ def create_app() -> FastAPI:
                 "height": str(body.get("height") or "").strip(),
                 "quality": str(body.get("quality") or "").strip(),
                 "metadata": metadata,
-                "image_items": collect_edit_image_items(values=body, is_form=False),
+                "image_items": collect_edit_image_items(values=body),
                 "raw_values": body,
             }
 
@@ -1620,7 +1681,7 @@ def create_app() -> FastAPI:
             "height": str(form.get("height") or "").strip(),
             "quality": str(form.get("quality") or "").strip(),
             "metadata": str(form.get("metadata") or "").strip(),
-            "image_items": collect_edit_image_items(values=form, is_form=True),
+            "image_items": collect_edit_image_items(values=form),
             "raw_values": form,
         }
 
@@ -1692,9 +1753,7 @@ def create_app() -> FastAPI:
                 },
             )
         )
-        spec_parameters = getattr(getattr(wf, "parameter_spec", None), "parameters", None) or {}
-        if image_rels or "inputImgCount" in spec_parameters:
-            standard_params.update(extra_edit_image_params(image_rels))
+        _apply_multi_image_params(standard_params, wf, image_rels, include_single=True)
         job = await jobs.create_job(
             kind=kind,
             workflow=workflow,
@@ -1826,10 +1885,32 @@ def create_app() -> FastAPI:
 
         image_rel = ""
         kind = "txt2video"
-        image_val = body.get("image")
-        if isinstance(image_val, str) and image_val.strip():
+        # newAPI-compatible video inputs: `image` (first frame), an `images` /
+        # `input_references` array (index 0 = first frame, 1 = last frame), and
+        # Kling-style `image_tail` (top level or inside `metadata`) for the
+        # last frame of first/last-frame-to-video workflows.
+        image_items = collect_edit_image_items(values=body)
+        tail_candidates: list[Any] = [body.get("image_tail")]
+        raw_meta = body.get("metadata")
+        if isinstance(raw_meta, dict):
+            tail_candidates.append(raw_meta.get("image_tail"))
+        for tail in tail_candidates:
+            tail_value = _edit_image_url_value(tail)
+            if not tail_value:
+                continue
+            if all((_edit_image_url_value(item) or "") != tail_value for item in image_items):
+                image_items.append(tail_value)
+        if len(image_items) > _EDIT_IMAGE_MAX:
+            raise _openai_error(f"Too many images: max {_EDIT_IMAGE_MAX}", http_status=400)
+
+        image_rels: list[str] = []
+        for index, item in enumerate(image_items, start=1):
+            stored = await _store_edit_image_item(item, filename_hint=f"image{index}")
+            if stored:
+                image_rels.append(stored)
+        image_rel = image_rels[0] if image_rels else ""
+        if image_rel:
             kind = "img2video"
-            image_rel = await _store_input_image_value(image_val, filename_hint="image")
 
         resolved = await _workflow_from_model_or_default(kind=kind, model=model, has_image=bool(image_rel))
         wf = resolved.workflow
@@ -1869,11 +1950,18 @@ def create_app() -> FastAPI:
                     "cfg",
                     "seed",
                     "image",
+                    "images",
+                    "input_references",
+                    "input_reference",
+                    "input_reference2",
+                    "image_tail",
+                    "inputImgCount",
                     "metadata",
                     "response_format",
                 },
             )
         )
+        _apply_multi_image_params(standard_params, wf, image_rels, include_single=False)
 
         meta_obj: Dict[str, Any] = {}
         raw_meta = body.get("metadata")

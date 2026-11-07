@@ -468,6 +468,11 @@ export interface PlaygroundFields {
   speed?: string;
   imageFile?: File | null;
   imageUrl?: string;
+  /** img2img ordered reference files; index 0 is the primary image. */
+  imageFiles?: File[];
+  /** img2video last-frame slot (optional; paired with imageFile/imageUrl as the first frame). */
+  lastFrameFile?: File | null;
+  lastFrameUrl?: string;
 }
 
 function imageStandardFields(fields: PlaygroundFields): Record<string, unknown> {
@@ -524,19 +529,26 @@ export async function submitPlayground(kind: PlaygroundKind, fields: PlaygroundF
   }
 
   if (kind === "img2img") {
-    const file = fields.imageFile ?? null;
+    const files = (fields.imageFiles ?? []).filter(Boolean);
     const imageUrl = (fields.imageUrl || "").trim();
-    if (file) {
+    if (files.length > 0) {
       const form = new FormData();
       for (const [key, value] of Object.entries(imageStandardFields(fields))) {
         form.append(key, String(value));
       }
-      form.append("image", file, file.name);
+      // Slot 0 is the first file; slots 1+ map to the backend's image2/image3 fields.
+      form.append("image", files[0], files[0].name);
+      const extraFiles = files.slice(1);
+      extraFiles.forEach((file, index) => form.append(`image${index + 2}`, file, file.name));
       const request: PlaygroundRequestTrace = {
         method: "POST",
         path: "/v1/images/edits",
         headers: { Authorization: "Bearer ***", "x-comfyui-async": "1" },
-        body: { ...imageStandardFields(fields), image: `<file:${file.name}>` }
+        body: {
+          ...imageStandardFields(fields),
+          image: `<file:${files[0].name}>`,
+          ...Object.fromEntries(extraFiles.map((file, index) => [`image${index + 2}`, `<file:${file.name}>`]))
+        }
       };
       const headers = new Headers({ Accept: "application/json", "x-comfyui-async": "1" });
       const auth = publicAuthHeader();
@@ -588,17 +600,33 @@ export async function submitPlayground(kind: PlaygroundKind, fields: PlaygroundF
 
   const file = kind === "img2video" ? fields.imageFile ?? null : null;
   const imageUrl = kind === "img2video" ? (fields.imageUrl || "").trim() : "";
+  const lastFrameFile = kind === "img2video" ? fields.lastFrameFile ?? null : null;
+  const lastFrameUrl = kind === "img2video" ? (fields.lastFrameUrl || "").trim() : "";
   if (file) {
     const form = new FormData();
     for (const [key, value] of Object.entries(videoStandardFields(fields))) {
       form.append(key, String(value));
     }
     form.append("input_reference", file, file.name);
+    // Optional last-frame slot for first/last-frame-to-video workflows.
+    if (lastFrameFile) {
+      form.append("input_reference2", lastFrameFile, lastFrameFile.name);
+    } else if (lastFrameUrl) {
+      form.append("input_reference2", lastFrameUrl);
+    }
     const request: PlaygroundRequestTrace = {
       method: "POST",
       path: "/v1/videos",
       headers: { Authorization: "Bearer ***" },
-      body: { ...videoStandardFields(fields), input_reference: `<file:${file.name}>` }
+      body: {
+        ...videoStandardFields(fields),
+        input_reference: `<file:${file.name}>`,
+        ...(lastFrameFile
+          ? { input_reference2: `<file:${lastFrameFile.name}>` }
+          : lastFrameUrl
+            ? { input_reference2: lastFrameUrl }
+            : {})
+      }
     };
     const headers = new Headers({ Accept: "application/json" });
     const auth = publicAuthHeader();
@@ -615,6 +643,7 @@ export async function submitPlayground(kind: PlaygroundKind, fields: PlaygroundF
 
   const body = videoStandardFields(fields);
   if (imageUrl) body.input_reference = imageUrl;
+  if (lastFrameUrl) body.input_reference2 = lastFrameUrl;
   const request: PlaygroundRequestTrace = {
     method: "POST",
     path: "/v1/videos",

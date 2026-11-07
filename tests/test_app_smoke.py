@@ -377,6 +377,238 @@ class AppSmokeTests(unittest.TestCase):
         self.assertTrue(kwargs["image"])
         self.assertEqual(kwargs["standard_params"], {"fps": 24, "duration": 5})
 
+    def test_chat_completions_collects_multiple_edit_images_in_order(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"first-image").decode("ascii")
+        second = "data:image/png;base64," + base64.b64encode(b"second-image").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-chat-edit", requested_model="test_img2img", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={
+                    "model": "test_img2img",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "merge these references"},
+                                {"type": "image_url", "image_url": {"url": first}},
+                                {"type": "input_image", "input_image": second},
+                            ],
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        content = json.loads(payload["choices"][0]["message"]["content"])
+        self.assertEqual(content["kind"], "img2img")
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2img")
+        self.assertEqual(kwargs["prompt"], "merge these references")
+        self.assertTrue(kwargs["image"])
+        standard = kwargs["standard_params"]
+        self.assertEqual(standard["inputImgCount"], 2)
+        self.assertTrue(standard["image2"])
+        self.assertNotEqual(standard["image2"], kwargs["image"])
+
+    def test_chat_completions_falls_back_to_older_message_image(self) -> None:
+        image_url = "data:image/png;base64," + base64.b64encode(b"older-image").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-chat-older", requested_model="test_hybrid_video", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={
+                    "model": "test_hybrid_video",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]},
+                        {"role": "user", "content": [{"type": "text", "text": "use the earlier image"}]},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["prompt"], "use the earlier image")
+        self.assertTrue(kwargs["image"])
+        # Single-image requests keep the pre-multi-image payload shape.
+        self.assertNotIn("image2", kwargs["standard_params"])
+        self.assertNotIn("inputImgCount", kwargs["standard_params"])
+
+    def test_newapi_video_generations_maps_metadata_image_tail_to_last_frame(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"first-frame").decode("ascii")
+        last = "data:image/png;base64," + base64.b64encode(b"last-frame").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="newapi-video-job", requested_model="test_dual_input_video", created_at=123
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/video/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "model": "test_dual_input_video",
+                    "prompt": "interpolate between frames",
+                    "image": first,
+                    "duration": 5,
+                    "metadata": {"image_tail": last},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["task_id"], "newapi-video-job")
+        self.assertEqual(payload["status"], "queued")
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        self.assertEqual(kwargs["workflow"], self.dual_input_video_workflow_name)
+        self.assertTrue(kwargs["image"])
+        standard = kwargs["standard_params"]
+        self.assertEqual(standard["inputImgCount"], 2)
+        self.assertTrue(standard["image2"])
+        self.assertNotEqual(standard["image2"], kwargs["image"])
+        self.assertEqual(standard.get("duration"), 5)
+
+    def test_newapi_video_generations_accepts_images_array_for_first_last_frames(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"array-first").decode("ascii")
+        last = "data:image/png;base64," + base64.b64encode(b"array-last").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="newapi-video-array", requested_model="test_dual_input_video", created_at=123
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/video/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "model": "test_dual_input_video",
+                    "prompt": "two reference frames",
+                    "images": [first, last],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        standard = kwargs["standard_params"]
+        self.assertEqual(standard["inputImgCount"], 2)
+        self.assertTrue(standard["image2"])
+
+    def test_newapi_video_generations_keeps_txt2video_without_images(self) -> None:
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="newapi-video-t2v", requested_model="test_txt2video", created_at=123
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/video/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"model": "test_txt2video", "prompt": "ocean waves", "duration": 4},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "txt2video")
+        self.assertEqual(kwargs["workflow"], self.txt2video_workflow_name)
+        self.assertEqual(kwargs["image"], "")
+        self.assertNotIn("inputImgCount", kwargs["standard_params"])
+
+    def test_newapi_video_generations_image_field_outranks_images_array(self) -> None:
+        primary = "data:image/png;base64," + base64.b64encode(b"primary-frame").decode("ascii")
+        extra = "data:image/png;base64," + base64.b64encode(b"extra-frame").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="newapi-video-mixed", requested_model="test_dual_input_video", created_at=123
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/video/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "model": "test_dual_input_video",
+                    "prompt": "mixed input forms",
+                    "image": primary,
+                    "images": [extra],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        standard = kwargs["standard_params"]
+        # `image` is the first frame even when an `images` array is also sent.
+        self.assertTrue(kwargs["image"])
+        self.assertEqual(standard["inputImgCount"], 2)
+        self.assertTrue(standard["image2"])
+        self.assertNotIn(kwargs["image"], standard["image2"])
+
+    def test_newapi_video_generations_accepts_url_objects_and_dedupes_tail(self) -> None:
+        frame = "data:image/png;base64," + base64.b64encode(b"object-frame").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="newapi-video-objects", requested_model="test_dual_input_video", created_at=123
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/video/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "model": "test_dual_input_video",
+                    "prompt": "object inputs",
+                    "images": [{"url": frame}],
+                    "metadata": {"image_tail": {"url": frame}},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        # The tail duplicates the only reference image, so it is not appended;
+        # a single-image request keeps the shape-stable payload (no count key
+        # on this workflow's sidecar).
+        self.assertNotIn("inputImgCount", kwargs["standard_params"])
+        self.assertNotIn("image2", kwargs["standard_params"])
+        self.assertTrue(kwargs["image"])
+
+    def test_chat_completions_accepts_body_image_array_with_url_objects(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"body-object").decode("ascii")
+        second = "data:image/png;base64," + base64.b64encode(b"body-plain").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-chat-body", requested_model="test_img2img", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={
+                    "model": "test_img2img",
+                    "prompt": "edit from body images",
+                    # The bare number is not a usable image reference and must
+                    # be dropped, not stringified into one.
+                    "image": [{"url": first}, 42, second],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2img")
+        self.assertTrue(kwargs["image"])
+        standard = kwargs["standard_params"]
+        self.assertEqual(standard["inputImgCount"], 2)
+        self.assertTrue(standard["image2"])
+        self.assertNotEqual(standard["image2"], kwargs["image"])
+
     def test_workflow_parameters_endpoint_exposes_sidecar_mapping(self) -> None:
         response = self.client.get(
             f"/v1/admin/workflows/{self.workflow_name}/parameters",
@@ -692,32 +924,47 @@ class AppSmokeTests(unittest.TestCase):
     def test_collect_edit_image_items_accepts_client_field_aliases(self) -> None:
         collect = self.app_module.collect_edit_image_items
         self.assertEqual(
-            collect(values={"image[0]": "one", "image[1]": "two"}, is_form=True),
+            collect(values={"image[0]": "one", "image[1]": "two"}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"image": "one", "image2": "two"}, is_form=True),
+            collect(values={"image": "one", "image2": "two"}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"image": ["one", "two"]}, is_form=True),
+            collect(values={"image": ["one", "two"]}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"image": "one", "image[]": "two", "image2": "two"}, is_form=True),
+            collect(values={"image": "one", "image[]": "two", "image2": "two"}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"input_reference": "one", "image2": "two"}, is_form=True),
+            collect(values={"input_reference": "one", "image2": "two"}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"input_reference": "one", "input_reference2": "two"}, is_form=True),
+            collect(values={"input_reference": "one", "input_reference2": "two"}),
             ["one", "two"],
         )
         self.assertEqual(
-            collect(values={"input_references": ["one", "two", "three"]}, is_form=False),
+            collect(values={"input_references": ["one", "two", "three"]}),
             ["one", "two", "three"],
+        )
+        self.assertEqual(
+            collect(values={"image": "one", "images": ["two", "three"]}),
+            ["one", "two", "three"],
+        )
+        # Field priority holds regardless of the client's JSON key order.
+        self.assertEqual(
+            collect(values={"images": ["two"], "image": "one"}),
+            ["one", "two"],
+        )
+        # Structurally equal URL objects are the same image and dedupe; the
+        # collector selects, normalization to URL strings happens at store time.
+        self.assertEqual(
+            collect(values={"images": [{"url": "one"}, {"url": "one"}, "two"]}),
+            [{"url": "one"}, "two"],
         )
 
     def test_images_edits_collects_repeated_image_field(self) -> None:

@@ -68,7 +68,8 @@ const emptyFields = {
   metadata: "",
   voice: "",
   speed: "",
-  imageUrl: ""
+  imageUrl: "",
+  lastFrameUrl: ""
 };
 
 type FieldState = typeof emptyFields;
@@ -210,6 +211,8 @@ export function PlaygroundPanel({
   const [kind, setKind] = useState<PlaygroundKind>(restored.kind);
   const [fields, setFields] = useState<FieldState>(restored.fields);
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageFiles, setImageFiles] = useState<File[]>([]);
+  const [lastFrameFile, setLastFrameFile] = useState<File | null>(null);
   const [models, setModels] = useState<PublicModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -244,7 +247,7 @@ export function PlaygroundPanel({
     if (!prefill) return;
     setKind(prefill.kind);
     setFields({ ...emptyFields, ...prefill.fields });
-    setImageFile(null);
+    clearImageInputs();
     setActiveOutputIdx(0);
     setHistoryPreview(null);
     if (prefill.hint) toast(prefill.hint, "info");
@@ -477,8 +480,12 @@ export function PlaygroundPanel({
       setError("请填写 prompt");
       return;
     }
-    if (needsImage && !imageFile && !source.imageUrl.trim()) {
+    if (kind === "img2img" && imageFiles.length === 0 && !source.imageUrl.trim()) {
       setError("请上传参考图或填写图片 URL");
+      return;
+    }
+    if (kind === "img2video" && !imageFile && !source.imageUrl.trim()) {
+      setError("请上传首帧或填写图片 URL");
       return;
     }
     if (!selectedReady) {
@@ -497,8 +504,11 @@ export function PlaygroundPanel({
     try {
       const result = await submitPlayground(kind, {
         ...source,
-        imageFile: needsImage ? imageFile : null,
-        imageUrl: needsImage ? source.imageUrl : ""
+        imageFile: kind === "img2video" ? imageFile : null,
+        imageFiles: kind === "img2img" ? imageFiles : [],
+        imageUrl: needsImage ? source.imageUrl : "",
+        lastFrameFile: kind === "img2video" ? lastFrameFile : null,
+        lastFrameUrl: kind === "img2video" ? source.lastFrameUrl : ""
       });
       setRequestTrace(result.request);
       setRawResponse(result.response);
@@ -560,7 +570,7 @@ export function PlaygroundPanel({
     const recordKind = modes.some((mode) => mode.kind === record.kind) ? (record.kind as PlaygroundKind) : kind;
     setKind(recordKind);
     setFields(next);
-    setImageFile(null);
+    clearImageInputs();
     setHistoryPreview(record);
     toast("已载入历史参数并回看结果，可修改后重新生成", "ok");
   }
@@ -575,6 +585,14 @@ export function PlaygroundPanel({
     }
   }
 
+  // Files aren't persisted (sessionStorage holds string fields only), so every
+  // prefill/history load drops them and asks the user to re-attach.
+  function clearImageInputs(): void {
+    setImageFile(null);
+    setImageFiles([]);
+    setLastFrameFile(null);
+  }
+
   const previewUrl = job?.url || job?.outputs?.[activeOutputIdx]?.url || video?.url || historyPreview?.result_url || "";
   const previewingHistory = !job?.url && !job?.outputs?.length && !video?.url && Boolean(historyPreview?.result_url);
   const progress = isVideo ? video?.progress ?? 0 : job?.progress_percent ?? 0;
@@ -583,8 +601,6 @@ export function PlaygroundPanel({
   const busy = submitting || statusText === "pending" || statusText === "queued" || statusText === "running" || statusText === "in_progress";
   const effectiveSeed = effectiveSeedOf(job);
   const outputs = job?.outputs ?? [];
-
-  const imageObjectUrl = useImageObjectUrl(imageFile);
 
   if (apiTokenNeeded) {
     return (
@@ -720,39 +736,56 @@ export function PlaygroundPanel({
               </label>
             </>
           ) : null}
-          {needsImage ? (
+          {kind === "img2img" ? (
             <div className="playground-field span-all">
-              <span>参考图（文件优先，否则 URL）</span>
+              <span>参考图（可多选，最多 3 张；文件优先，否则 URL）</span>
               <div className="playground-image">
-                {imageObjectUrl ? (
-                  <div className="ref-image-chip">
-                    <img src={imageObjectUrl} alt="参考图预览" />
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title="移除参考图"
-                      onClick={() => setImageFile(null)}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ) : null}
-                <label className="file-drop">
-                  <ImagePlus size={14} />
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) => setImageFile(event.target.files?.[0] ?? null)}
+                {imageFiles.map((file, index) => (
+                  <RefImageChip
+                    key={`${file.name}-${index}`}
+                    file={file}
+                    alt={`参考图 ${index + 1}`}
+                    onRemove={() => setImageFiles((current) => current.filter((_, i) => i !== index))}
                   />
-                  <em>{imageFile ? imageFile.name : "选择本地图片"}</em>
-                </label>
-                <input
-                  placeholder="https://… 图片 URL"
-                  value={fields.imageUrl}
-                  onChange={(event) => setField("imageUrl", event.target.value)}
-                />
+                ))}
+                {imageFiles.length < 3 ? (
+                  <FileDropInput
+                    multiple
+                    hint={imageFiles.length ? "继续添加图片" : "选择本地图片（可多选）"}
+                    onFiles={(picked) => {
+                      if (picked.length) setImageFiles((current) => [...current, ...picked].slice(0, 3));
+                    }}
+                  />
+                ) : null}
+                {imageFiles.length === 0 ? (
+                  <input
+                    placeholder="https://… 图片 URL"
+                    value={fields.imageUrl}
+                    onChange={(event) => setField("imageUrl", event.target.value)}
+                  />
+                ) : null}
               </div>
             </div>
+          ) : null}
+          {kind === "img2video" ? (
+            <>
+              <RefImageSlot
+                label="首帧（文件优先，否则 URL）"
+                file={imageFile}
+                onFileChange={setImageFile}
+                onRemoveFile={() => setImageFile(null)}
+                url={fields.imageUrl}
+                onUrlChange={(value) => setField("imageUrl", value)}
+              />
+              <RefImageSlot
+                label="尾帧（可选，供首尾帧模型使用）"
+                file={lastFrameFile}
+                onFileChange={setLastFrameFile}
+                onRemoveFile={() => setLastFrameFile(null)}
+                url={fields.lastFrameUrl}
+                onUrlChange={(value) => setField("lastFrameUrl", value)}
+              />
+            </>
           ) : null}
           {!isAudio ? (
             <>
@@ -1055,6 +1088,78 @@ function useImageObjectUrl(file: File | null): string {
     return () => URL.revokeObjectURL(objectUrl);
   }, [file]);
   return url;
+}
+
+/** File picker styled as a drop tile; `onFiles` decides append vs replace. */
+function FileDropInput({
+  multiple,
+  onFiles,
+  hint
+}: {
+  multiple: boolean;
+  onFiles: (files: File[]) => void;
+  hint: string;
+}): React.ReactElement {
+  return (
+    <label className="file-drop">
+      <ImagePlus size={14} />
+      <input
+        type="file"
+        accept="image/*"
+        multiple={multiple}
+        onChange={(event) => {
+          onFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
+      <em>{hint}</em>
+    </label>
+  );
+}
+
+/** One ordered reference-image chip with a local preview and a remove button. */
+function RefImageChip({ file, alt, onRemove }: { file: File; alt: string; onRemove: () => void }): React.ReactElement {
+  const objectUrl = useImageObjectUrl(file);
+  return (
+    <div className="ref-image-chip">
+      {objectUrl ? <img src={objectUrl} alt={alt} title={file.name} /> : null}
+      <button className="icon-button" type="button" title={`移除${alt}`} onClick={onRemove}>
+        <X size={14} />
+      </button>
+    </div>
+  );
+}
+
+/** A single image slot (file first, else URL) — used for video first/last frames. */
+function RefImageSlot({
+  label,
+  file,
+  onFileChange,
+  onRemoveFile,
+  url,
+  onUrlChange
+}: {
+  label: string;
+  file: File | null;
+  onFileChange: (file: File | null) => void;
+  onRemoveFile: () => void;
+  url: string;
+  onUrlChange: (value: string) => void;
+}): React.ReactElement {
+  return (
+    <div className="playground-field span-all">
+      <span>{label}</span>
+      <div className="playground-image">
+        {file ? <RefImageChip file={file} alt={label} onRemove={onRemoveFile} /> : null}
+        <FileDropInput
+          multiple={false}
+          hint={file ? file.name : "选择本地图片"}
+          onFiles={(picked) => onFileChange(picked[0] ?? null)}
+        />
+        <input placeholder="https://… 图片 URL" value={url} onChange={(event) => onUrlChange(event.target.value)} />
+      </div>
+    </div>
+  );
 }
 
 function statusLabelOf(status?: string | null): string {
